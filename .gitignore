@@ -1,0 +1,36 @@
+# Ignore environment files
+.env
+
+# Ignore macOS-specific files
+.DS_Store
+
+# Ignore binary and temporary directories
+bin/
+tmp/
+
+# Additional common exclusions
+# Ignore Go build artifacts
+*.exe
+*.dll
+*.so
+
+# Ignore Docker build artifacts
+Dockerfile
+docker-compose.yml
+
+# Ignore backup and log files
+*.bak
+*.log
+
+# Ignore database backup files
+backup.sql
+
+# Ignore configuration files with sensitive information
+internal/config/config.go
+
+# Ignore generated files
+go.sum
+
+# Ignore local development files
+.idea/
+.vscode/
