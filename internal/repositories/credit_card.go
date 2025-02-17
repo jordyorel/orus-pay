@@ -20,3 +20,21 @@ func GetCreditCardsPaginated(limit, offset int) ([]models.CreateCreditCard, int6
 
 	return creditCards, total, nil
 }
+
+// func GetCreditCardByID(cardID uint) (*models.CreateCreditCard, error) {
+// 	var card models.CreateCreditCard
+// 	result := DB.First(&card, cardID)
+// 	if result.Error != nil {
+// 		return nil, result.Error
+// 	}
+// 	return &card, nil
+// }
+
+func GetCreditCardByID(cardID uint) (*models.CreateCreditCard, error) {
+	var card models.CreateCreditCard
+	result := DB.First(&card, cardID)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return &card, nil
+}

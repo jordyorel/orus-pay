@@ -10,8 +10,132 @@ import (
 	"strconv"
 	"time"
 
+	"os"
+
 	"github.com/gofiber/fiber/v2"
+	"github.com/stripe/stripe-go/v72"
 )
+
+// TopUpWallet adds funds to the user's wallet.
+func TopUpWallet(c *fiber.Ctx) error {
+	// Extract user ID from JWT
+	userID, ok := c.Locals("userID").(uint)
+	if !ok || userID == 0 {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Unauthorized"})
+	}
+
+	// Parse request body
+	var request struct {
+		Amount   float64 `json:"amount"`
+		CardID   uint    `json:"card_id"`  // ID of the saved card to use
+		Currency string  `json:"currency"` // Optional: defaults to USD
+	}
+
+	if err := c.BodyParser(&request); err != nil {
+		log.Println("Error parsing request body:", err)
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request format"})
+	}
+
+	// Validate amount
+	if request.Amount <= 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid top-up amount"})
+	}
+
+	// Set default currency if not provided
+	if request.Currency == "" {
+		request.Currency = "usd"
+	}
+
+	// Fetch user's wallet
+	wallet, err := repositories.GetWalletByUserID(userID)
+	if err != nil {
+		log.Println("Wallet not found for user:", userID)
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Wallet not found"})
+	}
+
+	// Fetch the card details
+	card, err := repositories.GetCreditCardByID(request.CardID)
+	if err != nil {
+		log.Println("Card not found:", err)
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Card not found"})
+	}
+
+	// Verify card belongs to user
+	if card.UserID != userID {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "Card does not belong to user"})
+	}
+
+	// Create payment intent with Stripe
+	stripe.Key = os.Getenv("STRIPE_SECRET_KEY")
+	// amountInCents := int64(request.Amount * 100) // Convert to cents
+
+	// For test cards, simulate payment processing
+	var paymentStatus string
+	switch card.CardNumber {
+	case "tok_visa", "4242424242424242": // Always succeeds
+		paymentStatus = "succeeded"
+	case "tok_visa_declined", "4000000000000002": // Always fails
+		paymentStatus = "failed"
+	case "tok_visa_insufficient_funds", "4000000000009995": // Insufficient funds
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Insufficient funds on card"})
+	default:
+		paymentStatus = "succeeded" // Default to success for other test cards
+	}
+
+	// Create transaction record
+	transaction := &models.Transaction{
+		ReceiverID:  userID,
+		SenderID:    0, // System transaction
+		Amount:      request.Amount,
+		Status:      "pending",
+		Type:        "TOPUP",
+		PaymentType: "CARD",
+		CardID:      &request.CardID,
+		Currency:    request.Currency,
+	}
+
+	if err := repositories.CreateTransaction(transaction); err != nil {
+		log.Println("Error creating transaction:", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create transaction"})
+	}
+
+	// Process based on payment status
+	if paymentStatus == "succeeded" {
+		// Update wallet balance
+		wallet.Balance += request.Amount
+		if err := repositories.UpdateWallet(wallet); err != nil {
+			log.Println("Error updating wallet:", err)
+			transaction.Status = "failed"
+			repositories.UpdateTransaction(transaction)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to update wallet"})
+		}
+
+		// Update transaction status
+		transaction.Status = "completed"
+		if err := repositories.UpdateTransaction(transaction); err != nil {
+			log.Println("Error updating transaction:", err)
+			// Don't return error since the top-up was successful
+		}
+
+		return c.JSON(fiber.Map{
+			"message":        "Top-up successful",
+			"transaction_id": transaction.ID,
+			"wallet": fiber.Map{
+				"id":       wallet.ID,
+				"balance":  wallet.Balance,
+				"currency": wallet.Currency,
+			},
+		})
+	} else {
+		// Payment failed
+		transaction.Status = "failed"
+		repositories.UpdateTransaction(transaction)
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error":          "Payment failed",
+			"transaction_id": transaction.ID,
+		})
+	}
+}
 
 // LinkCreditCard links a credit card to the user's account.
 func LinkCreditCard(c *fiber.Ctx) error {
@@ -90,81 +214,6 @@ func validateCardInput(card models.CreateCreditCard) error {
 	}
 
 	return nil
-}
-
-// TopUpWallet adds funds to the user's wallet.
-func TopUpWallet(c *fiber.Ctx) error {
-	// Extract user ID from JWT (set by AuthMiddleware)
-	userID, ok := c.Locals("userID").(uint)
-	if !ok || userID == 0 {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Unauthorized"})
-	}
-
-	// Parse request body
-	var request struct {
-		Amount float64 `json:"amount"`
-	}
-
-	if err := c.BodyParser(&request); err != nil {
-		log.Println("Error parsing request body:", err)
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request format"})
-	}
-
-	// Validate amount
-	if request.Amount <= 0 {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid top-up amount"})
-	}
-
-	// Fetch user's wallet
-	wallet, err := repositories.GetWalletByUserID(userID)
-	if err != nil {
-		log.Println("Wallet not found for user:", userID)
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Wallet not found"})
-	}
-
-	// Create top-up transaction record
-	transaction := &models.Transaction{
-		ReceiverID: userID, // User receiving the money
-		SenderID:   0,      // 0 indicates system/top-up transaction
-		Amount:     request.Amount,
-		Status:     "pending",
-		Type:       "TOPUP",
-	}
-
-	if err := repositories.CreateTransaction(transaction); err != nil {
-		log.Println("Error creating top-up transaction:", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create transaction record"})
-	}
-
-	// Update balance
-	wallet.Balance += request.Amount
-	if err := repositories.UpdateWallet(wallet); err != nil {
-		log.Println("Error updating wallet balance:", err)
-		// Mark transaction as failed since wallet update failed
-		transaction.Status = "failed"
-		repositories.UpdateTransaction(transaction)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to update wallet balance"})
-	}
-
-	// Mark transaction as completed
-	transaction.Status = "completed"
-	if err := repositories.UpdateTransaction(transaction); err != nil {
-		log.Println("Error updating transaction status:", err)
-		// Note: We don't return an error here since the top-up was successful
-	}
-
-	log.Printf("User %d topped up %.2f %s", userID, request.Amount, wallet.Currency)
-
-	// Return success response
-	return c.JSON(fiber.Map{
-		"message":        "Wallet topped up successfully",
-		"transaction_id": transaction.ID,
-		"wallet": fiber.Map{
-			"id":       wallet.ID,
-			"balance":  wallet.Balance,
-			"currency": wallet.Currency,
-		},
-	})
 }
 
 // GetWallet retrieves the user's wallet details.

@@ -36,7 +36,7 @@ func SetupRoutes(app *fiber.App) {
 
 	// Payment and credit card routes
 	secured.Post("/credit-card", middleware.HasPermission(models.PermissionCreditCardWrite), LinkCreditCard)
-	secured.Post("/payment/qr", middleware.HasPermission(models.PermissionPaymentWrite), GeneratePaymentQR)
+	secured.Post("/payment/qr", middleware.HasPermission(models.PermissionPaymentWrite), GeneratePaymentQR) // To be emplemented
 
 	// Admin routes (require AdminAuthMiddleware)
 	admin := secured.Group("/admin", middleware.AdminAuthMiddleware)

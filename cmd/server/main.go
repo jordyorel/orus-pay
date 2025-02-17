@@ -44,7 +44,7 @@ func main() {
 
 	// CORS middleware
 	// app.Use(cors.New(cors.Config{
-	// 	AllowOrigins:     "https://example.com, https://anotherdomain.com", // Add your allowed origins
+	// 	AllowOrigins:     "https://example.com, https://anotherdomain.com", // Add allowed origins
 	// 	AllowHeaders:     "Origin, Content-Type, Accept, Authorization",
 	// 	AllowMethods:     "GET, POST, PUT, DELETE, OPTIONS",
 	// 	AllowCredentials: true, // Set to true if you're using cookies or Authorization headers

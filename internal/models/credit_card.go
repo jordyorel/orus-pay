@@ -10,6 +10,7 @@ type CreateCreditCard struct {
 	ExpiryMonth string `gorm:"not null" json:"expiry_month"`
 	ExpiryYear  string `gorm:"not null" json:"expiry_year"`
 	CardType    string `gorm:"default:'Visa'" json:"card_type"`
+	Token       string `json:"token"`
 }
 
 // VisaCardToken represents the card tokenization result returned after tokenizing the card.
