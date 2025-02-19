@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"gorm.io/gorm"
 )
 
 const (
@@ -140,23 +141,44 @@ func CreateWallet(wallet *models.Wallet) error {
 }
 
 func UpdateWallet(wallet *models.Wallet) error {
-	err := DB.Save(wallet).Error
-	if err != nil {
-		return err
+	// Only update balance and updated_at fields
+	result := DB.Model(wallet).Updates(map[string]interface{}{
+		"balance":    wallet.Balance,
+		"updated_at": time.Now(),
+	})
+
+	if result.Error != nil {
+		log.Printf("Error updating wallet: %v", result.Error)
+		return result.Error
 	}
 
-	cacheKeys := []string{
-		getWalletCacheKeyByUserID(wallet.UserID),
-		getWalletCacheKeyByQRCodeID(wallet.QRCodeID),
-	}
-
-	go func() {
-		if err := RedisClient.Del(RedisCtx, cacheKeys...).Err(); err != nil {
-			log.Printf("Failed to invalidate wallet cache for user %d: %v", wallet.UserID, err)
-		}
-	}()
+	// Invalidate wallet cache
+	cacheKey := getWalletCacheKeyByUserID(wallet.UserID)
+	RedisClient.Del(RedisCtx, cacheKey)
 
 	return nil
+}
+
+func TopUpWallet(userID uint, amount float64) error {
+	return DB.Transaction(func(tx *gorm.DB) error {
+		var wallet models.Wallet
+		if err := tx.Where("user_id = ?", userID).First(&wallet).Error; err != nil {
+			return err
+		}
+
+		wallet.Balance += amount
+
+		// Only update balance
+		if err := tx.Model(&wallet).Update("balance", wallet.Balance).Error; err != nil {
+			return err
+		}
+
+		// Invalidate cache
+		cacheKey := getWalletCacheKeyByUserID(userID)
+		RedisClient.Del(RedisCtx, cacheKey)
+
+		return nil
+	})
 }
 
 // generateQRCode generates a fixed QR code ID for the wallet

@@ -8,24 +8,26 @@ const (
 	PermissionReadAdmin  = "admin:read"
 	PermissionWriteAdmin = "admin:write"
 
-	// Wallet permissions
-	PermissionWalletRead  = "wallet:read"
-	PermissionWalletWrite = "wallet:write"
-
-	// Transaction permissions
+	// User permissions
+	PermissionWalletRead       = "wallet:read"
+	PermissionWalletWrite      = "wallet:write"
 	PermissionTransactionRead  = "transaction:read"
 	PermissionTransactionWrite = "transaction:write"
+	PermissionCreditCardWrite  = "creditcard:write"
+	PermissionChangePassword   = "user:change-password"
+
+	// Merchant permissions
+	PermissionMerchantCreate      = "merchant:create"
+	PermissionMerchantRead        = "merchant:read"
+	PermissionMerchantWrite       = "merchant:write"
+	PermissionMerchantTransaction = "merchant:transaction"
 
 	// Payment permissions
 	PermissionPaymentWrite = "payment:write"
 
-	// Credit card permissions
-	PermissionCreditCardWrite = "creditcard:write"
-
 	// User management permissions
-	PermissionUserRead       = "user:read"
-	PermissionUserWrite      = "user:write"
-	PermissionChangePassword = "user:change_password"
+	PermissionUserRead  = "user:read"
+	PermissionUserWrite = "user:write"
 )
 
 type UserClaims struct {
@@ -63,6 +65,21 @@ func GetDefaultPermissions(role string) []string {
 			PermissionChangePassword,
 			PermissionReadAdmin,
 			PermissionWriteAdmin,
+			PermissionMerchantRead,
+			PermissionMerchantWrite,
+		}
+	case "merchant":
+		return []string{
+			PermissionWalletRead,
+			PermissionWalletWrite,
+			PermissionTransactionRead,
+			PermissionTransactionWrite,
+			PermissionCreditCardWrite,
+			PermissionChangePassword,
+			PermissionMerchantRead,
+			PermissionMerchantWrite,
+			PermissionMerchantTransaction,
+			PermissionMerchantCreate,
 		}
 	case "user":
 		return []string{

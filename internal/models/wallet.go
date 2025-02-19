@@ -4,7 +4,7 @@ import "gorm.io/gorm"
 
 type Wallet struct {
 	gorm.Model
-	UserID   uint    `gorm:"not null"`
+	UserID   uint    `gorm:"not null;unique"`
 	Balance  float64 `gorm:"default:0.0"`
 	Currency string  `gorm:"default:'USD'"`
 	QRCodeID string  `gorm:"unique;not null"`

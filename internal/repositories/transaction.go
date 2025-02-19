@@ -1,6 +1,13 @@
 package repositories
 
-import "orus/internal/models"
+import (
+	"errors"
+	"fmt"
+	"log"
+	"orus/internal/models"
+
+	"gorm.io/gorm"
+)
 
 func CreateTransaction(tx *models.Transaction) error {
 	return DB.Create(tx).Error
@@ -29,4 +36,76 @@ func GetUserTransactions(userID uint, limit int, offset int) ([]models.Transacti
 	result := DB.Where("sender_id = ? OR receiver_id = ?", userID, userID).
 		Limit(limit).Offset(offset).Order("created_at DESC").Find(&transactions)
 	return transactions, result.Error
+}
+
+func ProcessTransaction(senderID uint, receiverID uint, amount float64, qrCodeID string) error {
+	return DB.Transaction(func(tx *gorm.DB) error {
+		// Validate amount
+		if amount <= 0 {
+			return errors.New("amount must be greater than zero")
+		}
+
+		// Prevent self-transfer
+		if senderID == receiverID {
+			return errors.New("cannot send money to yourself")
+		}
+
+		// Get sender's wallet
+		senderWallet, err := GetWalletByUserID(senderID)
+		if err != nil {
+			return fmt.Errorf("failed to fetch sender's wallet: %v", err)
+		}
+
+		// Check sufficient balance
+		if senderWallet.Balance < amount {
+			return fmt.Errorf("insufficient funds: available %.2f, requested %.2f", senderWallet.Balance, amount)
+		}
+
+		// Get receiver's wallet
+		receiverWallet, err := GetWalletByUserID(receiverID)
+		if err != nil {
+			return fmt.Errorf("failed to fetch receiver's wallet: %v", err)
+		}
+
+		// Create transaction record
+		transaction := &models.Transaction{
+			SenderID:   senderID,
+			ReceiverID: receiverID,
+			Amount:     amount,
+			Status:     "pending",
+			QRCodeID:   qrCodeID,
+			Type:       "TRANSFER",
+		}
+
+		if err := tx.Create(transaction).Error; err != nil {
+			return fmt.Errorf("failed to create transaction: %v", err)
+		}
+
+		// Update balances
+		senderWallet.Balance -= amount
+		if err := tx.Model(senderWallet).Update("balance", senderWallet.Balance).Error; err != nil {
+			return fmt.Errorf("failed to update sender's wallet: %v", err)
+		}
+
+		receiverWallet.Balance += amount
+		if err := tx.Model(receiverWallet).Update("balance", receiverWallet.Balance).Error; err != nil {
+			return fmt.Errorf("failed to update receiver's wallet: %v", err)
+		}
+
+		// Mark transaction as completed
+		if err := tx.Model(transaction).Update("status", "completed").Error; err != nil {
+			log.Printf("Warning: Failed to update transaction status: %v", err)
+		}
+
+		// Invalidate wallet caches
+		InvalidateWalletCache(senderID)
+		InvalidateWalletCache(receiverID)
+
+		return nil
+	})
+}
+
+func InvalidateWalletCache(userID uint) {
+	cacheKey := getWalletCacheKeyByUserID(userID)
+	RedisClient.Del(RedisCtx, cacheKey)
 }

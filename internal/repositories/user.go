@@ -5,7 +5,6 @@ import (
 	"log"
 	"orus/internal/models"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -42,15 +41,14 @@ func GetUserByEmail(email string) (*models.User, error) {
 
 	// Cache miss, query database
 	var user models.User
-	err = DB.Where("email = ?", email).First(&user).Error
-	if err != nil {
+	if err := DB.Where("email = ?", email).First(&user).Error; err != nil {
 		return nil, err
 	}
 
-	// Update cache async to avoid blocking
+	// Update cache async
 	go func() {
 		if err := cacheSetUser(cacheKey, &user, userCacheExpiration); err != nil {
-			log.Printf("Failed to cache user by email: %v", err)
+			log.Printf("Failed to cache user %s: %v", email, err)
 		}
 	}()
 
@@ -111,39 +109,52 @@ func GetUserByPhone(phone string) (*models.User, error) {
 }
 
 func CreateUser(user *models.User) error {
-	if DB == nil {
-		return fmt.Errorf("database connection is nil")
-	}
-
-	var existingUser models.User
-	err := DB.Where("email = ? AND deleted_at IS NULL", user.Email).First(&existingUser).Error // Check with deleted_at!
-	if err == nil || err != gorm.ErrRecordNotFound {
-		return fmt.Errorf("user with email %s already exists", user.Email)
-	}
-
-	err = DB.Where("phone = ? AND deleted_at IS NULL", user.Phone).First(&existingUser).Error // Check with deleted_at!
-	if err == nil || err != gorm.ErrRecordNotFound {
-		return fmt.Errorf("user with phone %s already exists", user.Phone)
-	}
-
-	result := DB.Create(user)
-	if result.Error != nil {
-		if strings.Contains(result.Error.Error(), "uni_users_email") {
-			return fmt.Errorf("user with email %s already exists", user.Email)
+	return DB.Transaction(func(tx *gorm.DB) error {
+		// Check for existing user
+		var existingUser models.User
+		if err := tx.Where("email = ? OR phone = ?", user.Email, user.Phone).First(&existingUser).Error; err != nil {
+			if err != gorm.ErrRecordNotFound {
+				return fmt.Errorf("error checking existing user: %w", err)
+			}
+		} else {
+			return fmt.Errorf("user with this email or phone already exists")
 		}
-		log.Printf("Error creating user: %T", result.Error)
-		return fmt.Errorf("failed to create user")
-	}
 
-	// Invalidate potential cache entries
-	go func() {
-		RedisClient.Del(RedisCtx,
-			GetUserCacheKeyByEmail(user.Email),
-			GetUserCacheKeyByPhone(user.Phone),
-		)
-	}()
+		// Create user first with null wallet_id
+		user.WalletID = nil
+		if err := tx.Create(user).Error; err != nil {
+			return fmt.Errorf("failed to create user: %w", err)
+		}
 
-	return nil
+		// Create wallet
+		wallet := &models.Wallet{
+			UserID:   user.ID,
+			Balance:  0,
+			Currency: "USD",
+			QRCodeID: fmt.Sprintf("orus://pay?user_id=%d", user.ID),
+		}
+		if err := tx.Create(wallet).Error; err != nil {
+			return fmt.Errorf("failed to create wallet: %w", err)
+		}
+
+		// Update user's wallet_id
+		walletIDUint := uint(wallet.ID)
+		user.WalletID = &walletIDUint
+		if err := tx.Model(user).Update("wallet_id", wallet.ID).Error; err != nil {
+			return fmt.Errorf("failed to update user with wallet: %w", err)
+		}
+
+		// Invalidate all possible cache keys for this user
+		go func() {
+			RedisClient.Del(RedisCtx,
+				getUserCacheKeyByID(user.ID),
+				GetUserCacheKeyByEmail(user.Email),
+				GetUserCacheKeyByPhone(user.Phone),
+			)
+		}()
+
+		return nil
+	})
 }
 
 // internal/repositories/user.go

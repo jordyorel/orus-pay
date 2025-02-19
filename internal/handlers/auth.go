@@ -5,6 +5,7 @@ import (
 	"orus/internal/config"
 	"orus/internal/models"
 	"orus/internal/repositories"
+	"orus/internal/utils"
 	"os"
 	"strconv"
 	"time"
@@ -46,6 +47,9 @@ func LoginUser(c *fiber.Ctx) error {
 	// 	log.Println("Error incrementing token version:", err)
 	// 	return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Internal server error"})
 	// }
+
+	// Invalidate cache before fetching fresh user data
+	repositories.InvalidateUserCache(user.ID)
 
 	user, err = repositories.GetUserByID(user.ID)
 	if err != nil {
@@ -140,47 +144,66 @@ func LogoutUser(c *fiber.Ctx) error {
 
 // ChangePassword handles password change requests
 func ChangePassword(c *fiber.Ctx) error {
-	userID, ok := c.Locals("userID").(uint)
-	if !ok || userID == 0 {
-		log.Println("Error: userID not found in token")
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Unauthorized"})
-	}
-
-	var request struct {
+	var input struct {
 		OldPassword string `json:"old_password"`
 		NewPassword string `json:"new_password"`
 	}
-	if err := c.BodyParser(&request); err != nil {
-		log.Println("Error parsing request body:", err)
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request format"})
+
+	if err := c.BodyParser(&input); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Invalid request body",
+		})
 	}
 
+	// Get user from claims
+	claims := c.Locals("claims").(*models.UserClaims)
+	userID := claims.UserID
+
+	// Get user from database
 	user, err := repositories.GetUserByID(userID)
 	if err != nil {
-		log.Println("Error finding user:", err)
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "User not found"})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Failed to get user",
+		})
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(request.OldPassword)); err != nil {
-		log.Println("Incorrect old password")
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid credentials"})
+	// Verify old password
+	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(input.OldPassword)); err != nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"error": "Invalid old password",
+		})
 	}
 
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(request.NewPassword), bcrypt.DefaultCost)
+	// Validate new password
+	if len(input.NewPassword) < 8 || !utils.HasSpecialChar(input.NewPassword) {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Password must be at least 8 characters and contain special characters",
+		})
+	}
+
+	// Hash new password
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(input.NewPassword), bcrypt.DefaultCost)
 	if err != nil {
-		log.Println("Error hashing new password:", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Internal server error"})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Failed to hash password",
+		})
 	}
 
+	// Update password and increment token version to invalidate existing tokens
 	user.Password = string(hashedPassword)
 	user.TokenVersion++
-	if err := repositories.UpdateUser(user); err != nil {
-		log.Println("Error updating password:", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Password update failed"})
+	if err := repositories.DB.Save(user).Error; err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Failed to update password",
+		})
 	}
 
-	log.Println("Password changed successfully")
-	return c.JSON(fiber.Map{"message": "Password updated successfully"})
+	// Invalidate user cache
+	repositories.InvalidateUserCache(user.ID)
+
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"message": "Password changed successfully",
+	})
 }
 
 // Helper functions

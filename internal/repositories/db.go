@@ -19,9 +19,26 @@ var (
 	RedisCtx    = context.Background()
 )
 
-func InitDB() {
+func InitDB() error {
 	initPostgres()
 	initRedis()
+
+	// Auto-migrate the schema
+	err := DB.AutoMigrate(
+		&models.User{},
+		&models.Wallet{},
+		&models.Merchant{},
+		&models.MerchantLimits{},
+		&models.Transaction{},
+		&models.CreateCreditCard{},
+		&models.KYCVerification{},
+		&models.MerchantBankAccount{},
+		&models.Enterprise{},
+		&models.EnterpriseLocation{},
+		&models.EnterpriseAPIKey{},
+	)
+
+	return err
 }
 
 func initPostgres() {
@@ -78,18 +95,6 @@ func initPostgres() {
 	db.Exec("GRANT ALL ON SCHEMA public TO postgres;")
 	db.Exec("GRANT ALL ON SCHEMA public TO public;")
 	db.Exec("SET search_path TO public;")
-
-	// Run migrations
-	err = db.AutoMigrate(
-		&models.User{},
-		&models.Wallet{},
-		&models.Transaction{},
-		&models.CreateCreditCard{},
-		&models.KYCVerification{},
-	)
-	if err != nil {
-		log.Fatal("Migration failed:", err)
-	}
 
 	log.Println("✅ PostgreSQL connected & migrations applied successfully!")
 }

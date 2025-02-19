@@ -102,3 +102,60 @@ func HasPermission(permission string) fiber.Handler {
 		return c.Next()
 	}
 }
+
+func Protected() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		// Get user from AuthMiddleware
+		claims, ok := c.Locals("claims").(*models.UserClaims)
+		if !ok || claims == nil {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error": "Unauthorized",
+			})
+		}
+
+		// Get the route's required role from metadata or path
+		requiredRole := getRequiredRole(c.Path())
+		if !hasRequiredRole(claims.Role, requiredRole) {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+				"error": "Insufficient permissions",
+			})
+		}
+
+		return c.Next()
+	}
+}
+
+func getRequiredRole(path string) string {
+	// Define role requirements for different paths
+	switch {
+	case strings.HasPrefix(path, "/api/merchant"):
+		return "merchant"
+	case strings.HasPrefix(path, "/api/enterprise"):
+		return "enterprise"
+	case strings.HasPrefix(path, "/api/admin"):
+		return "admin"
+	case strings.HasPrefix(path, "/api/wallet"):
+		return "user" // Allow both users and merchants to access wallet endpoints
+	default:
+		return "user"
+	}
+}
+
+func hasRequiredRole(userRole, requiredRole string) bool {
+	roleHierarchy := map[string]int{
+		"user":       1,
+		"merchant":   2,
+		"enterprise": 3,
+		"admin":      4,
+	}
+
+	userRoleLevel := roleHierarchy[userRole]
+	requiredRoleLevel := roleHierarchy[requiredRole]
+
+	// Allow merchants to access user endpoints
+	if userRole == "merchant" && requiredRole == "user" {
+		return true
+	}
+
+	return userRoleLevel >= requiredRoleLevel
+}

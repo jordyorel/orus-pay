@@ -18,32 +18,55 @@ func SetupRoutes(app *fiber.App) {
 	api.Post("/login", LoginUser)
 	api.Post("/refresh", RefreshToken)
 
-	// Secured routes (require AuthMiddleware)
-	secured := api.Use(middleware.AuthMiddleware)
-
-	// User management routes
-	// secured.Post("/logout", LogoutUser)
-	secured.Post("/logout", middleware.AuthMiddleware, LogoutUser)
-	secured.Post("/change-password", middleware.HasPermission(models.PermissionChangePassword), ChangePassword)
+	// User routes (requires any authenticated user)
+	user := api.Group("/", middleware.AuthMiddleware)
+	user.Use(middleware.Protected())
 
 	// Wallet routes
-	secured.Post("/wallet", middleware.HasPermission(models.PermissionWalletRead), GetWallet)
-	secured.Post("/wallet/topup", middleware.HasPermission(models.PermissionWalletWrite), TopUpWallet)
+	user.Post("/wallet", middleware.HasPermission(models.PermissionWalletRead), GetWallet)
+	user.Post("/wallet/topup", middleware.HasPermission(models.PermissionWalletWrite), TopUpWallet)
+	user.Post("/wallet/withdraw", middleware.HasPermission(models.PermissionWalletWrite), WithdrawToCard)
 
 	// Transaction routes
-	secured.Post("/transaction", middleware.HasPermission(models.PermissionTransactionWrite), ProcessTransaction)
-	secured.Get("/transactions", middleware.HasPermission(models.PermissionTransactionRead), GetUserTransactions)
+	user.Post("/transaction", middleware.HasPermission(models.PermissionTransactionWrite), ProcessTransaction)
+	user.Get("/transactions", middleware.HasPermission(models.PermissionTransactionRead), GetUserTransactions)
 
-	// Payment and credit card routes
-	secured.Post("/credit-card", middleware.HasPermission(models.PermissionCreditCardWrite), LinkCreditCard)
-	secured.Post("/payment/qr", middleware.HasPermission(models.PermissionPaymentWrite), GeneratePaymentQR) // To be emplemented
+	// Other user routes
+	user.Post("/credit-card", middleware.HasPermission(models.PermissionCreditCardWrite), LinkCreditCard)
+	user.Post("/change-password", middleware.HasPermission(models.PermissionChangePassword), ChangePassword)
+	user.Post("/refresh", RefreshToken)
+	user.Post("/logout", LogoutUser)
+
+	// Merchant routes (requires merchant role)
+	merchant := api.Group("/merchant", middleware.AuthMiddleware)
+	merchant.Use(middleware.Protected())
+	merchantHandler := NewMerchantHandler()
+
+	// Merchant management
+	merchant.Post("/", merchantHandler.CreateMerchant)
+	merchant.Get("/profile", middleware.HasPermission(models.PermissionMerchantRead), merchantHandler.GetMerchantProfile)
+	merchant.Put("/profile", middleware.HasPermission(models.PermissionMerchantWrite), merchantHandler.UpdateMerchantProfile)
+
+	// Merchant transactions
+	merchant.Post("/:merchantId/transaction", middleware.HasPermission(models.PermissionMerchantTransaction), merchantHandler.ProcessTransaction)
+	merchant.Get("/:merchantId/transactions", middleware.HasPermission(models.PermissionMerchantRead), merchantHandler.GetMerchantTransactions)
+
+	// Merchant settings
+	merchant.Post("/:merchantId/apikey", middleware.HasPermission(models.PermissionMerchantWrite), merchantHandler.GenerateAPIKey)
+	merchant.Post("/:merchantId/webhook", middleware.HasPermission(models.PermissionMerchantWrite), merchantHandler.SetWebhookURL)
+
+	// Enterprise routes (requires enterprise role)
+	enterprise := api.Group("/enterprise", middleware.AuthMiddleware)
+	enterprise.Use(middleware.Protected())
+	enterpriseHandler := NewEnterpriseHandler()
+	enterprise.Post("/", enterpriseHandler.CreateEnterprise)
+	enterprise.Post("/:enterpriseId/apikey", enterpriseHandler.GenerateAPIKey)
 
 	// Admin routes (require AdminAuthMiddleware)
-	admin := secured.Group("/admin", middleware.AdminAuthMiddleware)
+	admin := api.Group("/admin", middleware.AdminAuthMiddleware)
 	admin.Get("/transactions", middleware.HasPermission(models.PermissionReadAdmin), GetAllTransactions)
 	admin.Get("/users", middleware.HasPermission(models.PermissionReadAdmin), GetUsersPaginated)
 	admin.Delete("/users/:id", middleware.HasPermission(models.PermissionWriteAdmin), DeleteUser)
 	admin.Get("/wallets", middleware.HasPermission(models.PermissionWriteAdmin), GetAllWallets)          // Admin view all wallets
 	admin.Get("/credit-cards", middleware.HasPermission(models.PermissionWriteAdmin), GetAllCreditCards) // Admin view all credit cards
-
 }
