@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"orus/internal/models"
 	"orus/internal/repositories"
 	"orus/internal/services"
@@ -16,7 +17,7 @@ import (
 	"github.com/stripe/stripe-go/v72"
 )
 
-// TopUpWallet adds funds to the user's wallet.
+// TopUpWallet adds funds to the user's wallet without fees
 func TopUpWallet(c *fiber.Ctx) error {
 	// Extract user ID from JWT
 	userID, ok := c.Locals("userID").(uint)
@@ -86,8 +87,8 @@ func TopUpWallet(c *fiber.Ctx) error {
 	// Create transaction record
 	transaction := &models.Transaction{
 		ReceiverID:  userID,
-		SenderID:    0, // System transaction
-		Amount:      request.Amount,
+		SenderID:    0,              // System transaction
+		Amount:      request.Amount, // No fees on top-up
 		Status:      "pending",
 		Type:        "TOPUP",
 		PaymentType: "CARD",
@@ -95,49 +96,35 @@ func TopUpWallet(c *fiber.Ctx) error {
 		Currency:    request.Currency,
 	}
 
+	// Save the transaction
 	if err := repositories.CreateTransaction(transaction); err != nil {
-		log.Println("Error creating transaction:", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create transaction"})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Failed to create transaction",
+		})
 	}
 
-	// Process based on payment status
+	// Process payment and update wallet
 	if paymentStatus == "succeeded" {
-		// Update wallet balance
+		transaction.Status = "completed"
+		// Update wallet balance directly without fees
 		wallet.Balance += request.Amount
 		if err := repositories.UpdateWallet(wallet); err != nil {
-			log.Println("Error updating wallet:", err)
-			transaction.Status = "failed"
-			repositories.UpdateTransaction(transaction)
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to update wallet"})
 		}
-
-		// Update transaction status
-		transaction.Status = "completed"
-		if err := repositories.UpdateTransaction(transaction); err != nil {
-			log.Println("Error updating transaction:", err)
-			// Don't return error since the top-up was successful
-		}
-
-		return c.JSON(fiber.Map{
-			"message":        "Top-up successful",
-			"transaction_id": transaction.ID,
-			"wallet": fiber.Map{
-				"id":       wallet.ID,
-				"balance":  wallet.Balance,
-				"currency": wallet.Currency,
-			},
-		})
-	} else {
-		// Payment failed
-		transaction.Status = "failed"
-		repositories.UpdateTransaction(transaction)
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error":          "Payment failed",
-			"transaction_id": transaction.ID,
-		})
 	}
+
+	return c.JSON(fiber.Map{
+		"message":        "Top-up successful",
+		"transaction_id": transaction.ID,
+		"wallet": fiber.Map{
+			"id":       wallet.ID,
+			"balance":  wallet.Balance,
+			"currency": wallet.Currency,
+		},
+	})
 }
 
+// WithdrawToCard handles withdrawal with fees
 func WithdrawToCard(c *fiber.Ctx) error {
 	// Extract user ID from JWT
 	userID, ok := c.Locals("userID").(uint)
@@ -172,9 +159,15 @@ func WithdrawToCard(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Wallet not found"})
 	}
 
-	// Check if wallet has sufficient funds
-	if wallet.Balance < request.Amount {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "Insufficient funds"})
+	// Calculate withdrawal fee (e.g., 1.5%)
+	fee := request.Amount * 0.015
+	totalDeduction := request.Amount + fee
+
+	if wallet.Balance < totalDeduction {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Insufficient balance including fees",
+			"fee":   fee,
+		})
 	}
 
 	// Fetch the card details
@@ -191,13 +184,13 @@ func WithdrawToCard(c *fiber.Ctx) error {
 	// Create transaction record
 	transaction := &models.Transaction{
 		SenderID:    userID,
-		ReceiverID:  0, // System transaction
+		ReceiverID:  0, // System
 		Amount:      request.Amount,
+		Fee:         fee,
 		Status:      "pending",
 		Type:        "WITHDRAWAL",
 		PaymentType: "CARD",
 		CardID:      &request.CardID,
-		Currency:    request.Currency,
 	}
 
 	if err := repositories.CreateTransaction(transaction); err != nil {
@@ -218,7 +211,7 @@ func WithdrawToCard(c *fiber.Ctx) error {
 
 	if payoutStatus == "succeeded" {
 		// Update wallet balance
-		wallet.Balance -= request.Amount
+		wallet.Balance -= totalDeduction
 		if err := repositories.UpdateWallet(wallet); err != nil {
 			log.Println("Error updating wallet:", err)
 			transaction.Status = "failed"
@@ -231,7 +224,7 @@ func WithdrawToCard(c *fiber.Ctx) error {
 		if err := repositories.UpdateTransaction(transaction); err != nil {
 			log.Println("Error updating transaction:", err)
 			// Try to rollback the wallet balance
-			wallet.Balance += request.Amount
+			wallet.Balance += totalDeduction
 			if rollbackErr := repositories.UpdateWallet(wallet); rollbackErr != nil {
 				log.Printf("Critical error: Failed to rollback wallet balance after transaction status update failed. Original error: %v, Rollback error: %v", err, rollbackErr)
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -346,16 +339,28 @@ func validateCardInput(card models.CreateCreditCard) error {
 
 // GetWallet retrieves the user's wallet details.
 func GetWallet(c *fiber.Ctx) error {
-	userID, ok := c.Locals("userID").(uint)
-	if !ok || userID == 0 {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Unauthorized"})
+	claims := c.Locals("claims").(*models.UserClaims)
+	if claims == nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"error": "Unauthorized access",
+		})
 	}
 
-	// Fetch the user's wallet
-	wallet, err := repositories.GetWalletByUserID(userID)
+	// Log the permissions for debugging
+	log.Printf("User permissions: %v", claims.Permissions)
+	log.Printf("Required permission: %v", models.PermissionWalletRead)
+
+	wallet, err := repositories.GetWalletByUserID(claims.UserID)
 	if err != nil {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Wallet not found"})
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"error": "Wallet not found",
+		})
 	}
 
-	return c.JSON(fiber.Map{"wallet": wallet})
+	// Ensure balance is properly formatted
+	wallet.Balance = math.Round(wallet.Balance*100) / 100
+
+	return c.JSON(fiber.Map{
+		"wallet": wallet,
+	})
 }

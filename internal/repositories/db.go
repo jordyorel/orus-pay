@@ -1,27 +1,23 @@
 package repositories
 
 import (
-	"context"
 	"encoding/json"
 	"log"
 	"orus/internal/config"
 	"orus/internal/models"
 	"time"
 
-	"github.com/redis/go-redis/v9"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
 var (
-	DB          *gorm.DB
-	RedisClient *redis.Client
-	RedisCtx    = context.Background()
+	DB *gorm.DB
 )
 
 func InitDB() error {
 	initPostgres()
-	initRedis()
+	InitRedis()
 
 	// Auto-migrate the schema
 	err := DB.AutoMigrate(
@@ -36,6 +32,8 @@ func InitDB() error {
 		&models.Enterprise{},
 		&models.EnterpriseLocation{},
 		&models.EnterpriseAPIKey{},
+		&models.QRCode{},
+		&models.QRTransaction{},
 	)
 
 	return err
@@ -99,20 +97,6 @@ func initPostgres() {
 	log.Println("✅ PostgreSQL connected & migrations applied successfully!")
 }
 
-func initRedis() {
-	RedisClient = redis.NewClient(&redis.Options{
-		Addr:     config.GetEnv("REDIS_HOST", "redis") + ":6379",
-		Password: config.GetEnv("REDIS_PASSWORD", ""),
-		DB:       0,
-	})
-
-	_, err := RedisClient.Ping(RedisCtx).Result()
-	if err != nil {
-		log.Fatalf("🔥 Failed to connect to Redis: %v", err)
-	}
-	log.Println("✅ Redis connected successfully")
-}
-
 // Helper functions remain the same
 func cacheGetUser(key string) (*models.User, error) {
 	val, err := RedisClient.Get(RedisCtx, key).Result()
@@ -133,4 +117,20 @@ func cacheSetUser(key string, user *models.User, expiration time.Duration) error
 		return err
 	}
 	return RedisClient.Set(RedisCtx, key, userBytes, expiration).Err()
+}
+
+func ResetDatabase() error {
+	// Drop tables
+	err := DB.Migrator().DropTable(&models.User{}, &models.Wallet{}, &models.QRCode{} /* other tables */)
+	if err != nil {
+		return err
+	}
+
+	// Clear all caches
+	if err := ClearAllCaches(); err != nil {
+		return err
+	}
+
+	// Run migrations
+	return DB.AutoMigrate(&models.User{}, &models.Wallet{}, &models.QRCode{} /* other tables */)
 }

@@ -3,92 +3,50 @@ package services
 import (
 	"errors"
 	"fmt"
+	"log"
 	"orus/internal/models"
 	"orus/internal/repositories"
 
 	"gorm.io/gorm"
 )
 
+var (
+	ErrMerchantInactive = errors.New("merchant is not active")
+)
+
 type MerchantService struct {
-	feeCalculator *FeeCalculator
+	feeCalculator      *FeeCalculator
+	transactionService *TransactionService
 }
 
 func NewMerchantService() *MerchantService {
 	return &MerchantService{
-		feeCalculator: NewFeeCalculator(),
+		feeCalculator:      NewFeeCalculator(),
+		transactionService: NewTransactionService(),
 	}
 }
 
 func (s *MerchantService) CreateMerchant(merchant *models.Merchant) error {
-	// Verify user exists and has merchant role
-	user, err := repositories.GetUserByID(merchant.UserID)
-	if err != nil {
-		return fmt.Errorf("user not found: %w", err)
-	}
+	log.Printf("Checking for existing merchant for user ID: %d", merchant.UserID)
 
-	if user.Role != "merchant" {
-		return fmt.Errorf("user must have merchant role to create merchant profile")
-	}
-
-	// Check if merchant profile already exists
 	existingMerchant, err := repositories.GetMerchantByUserID(merchant.UserID)
-	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		return fmt.Errorf("error checking existing merchant: %w", err)
+	if err != nil {
+		log.Printf("Error checking existing merchant: %v", err)
+		return err
 	}
 
-	// If merchant exists, only update the additional fields
 	if existingMerchant != nil {
-		// Keep existing basic info, update only the new fields
-		updates := map[string]interface{}{
-			"business_id":         merchant.BusinessID,
-			"tax_id":              merchant.TaxID,
-			"website":             merchant.Website,
-			"merchant_category":   merchant.MerchantCategory,
-			"legal_entity_type":   merchant.LegalEntityType,
-			"registration_number": merchant.RegistrationNumber,
-			"year_established":    merchant.YearEstablished,
-			"support_email":       merchant.SupportEmail,
-			"support_phone":       merchant.SupportPhone,
-			"verification_status": "pending_review",
-		}
-
-		return repositories.DB.Model(existingMerchant).Updates(updates).Error
+		log.Printf("Found existing merchant for user ID: %d", merchant.UserID)
+		return errors.New("merchant profile already exists for this user")
 	}
 
-	// Set default values for new merchant
-	merchant.VerificationStatus = "pending_review"
-	merchant.ProcessingFeeRate = 2.5
+	log.Printf("Creating new merchant for user ID: %d", merchant.UserID)
+	// Set initial risk score and compliance level
+	merchant.RiskScore = int(calculateInitialRiskScore(merchant))
+	merchant.ComplianceLevel = determineComplianceLevel(float64(merchant.RiskScore))
 
-	return repositories.DB.Transaction(func(tx *gorm.DB) error {
-		// Create merchant profile
-		if err := tx.Create(merchant).Error; err != nil {
-			return fmt.Errorf("failed to create merchant: %w", err)
-		}
-
-		// Create default merchant limits
-		limits := &models.MerchantLimits{
-			MerchantID:              merchant.ID,
-			DailyTransactionLimit:   10000,
-			MonthlyTransactionLimit: 100000,
-			SingleTransactionLimit:  5000,
-			MinTransactionAmount:    1,
-			MaxTransactionAmount:    5000,
-			ConcurrentTransactions:  10,
-			AllowedCurrencies:       []string{"USD", "EUR"},
-		}
-
-		if err := tx.Create(limits).Error; err != nil {
-			return fmt.Errorf("failed to create merchant limits: %w", err)
-		}
-
-		// Update user status to indicate merchant profile needs completion
-		if err := tx.Model(&models.User{}).Where("id = ?", merchant.UserID).
-			Update("merchant_profile_status", "pending_completion").Error; err != nil {
-			return fmt.Errorf("failed to update user status: %w", err)
-		}
-
-		return nil
-	})
+	// Create new merchant
+	return repositories.CreateMerchant(merchant)
 }
 
 func (s *MerchantService) UpdateLimits(merchantID uint, limits models.MerchantLimits) error {
@@ -96,27 +54,33 @@ func (s *MerchantService) UpdateLimits(merchantID uint, limits models.MerchantLi
 		Update("limits", limits).Error
 }
 
-func (s *MerchantService) ProcessTransaction(merchantID uint, amount float64) error {
-	var merchant models.Merchant
-	if err := repositories.DB.Preload("Limits").First(&merchant, merchantID).Error; err != nil {
-		return fmt.Errorf("merchant not found: %w", err)
-	}
+func (s *MerchantService) ProcessTransaction(tx *models.Transaction) (*models.Transaction, error) {
+	var result *models.Transaction
+	err := repositories.DB.Transaction(func(dbTx *gorm.DB) error {
+		// Get merchant by user_id instead of id
+		var merchant models.Merchant
+		if err := dbTx.Where("user_id = ?", *tx.MerchantID).First(&merchant).Error; err != nil {
+			return fmt.Errorf("merchant not found: %w", err)
+		}
 
-	// Check limits
-	if amount > merchant.Limits.SingleTransactionLimit {
-		return fmt.Errorf("amount exceeds single transaction limit")
-	}
+		if !merchant.IsActive {
+			return ErrMerchantInactive
+		}
 
-	// Calculate fee using the injected calculator
-	fee := s.feeCalculator.CalculateTransactionFee(amount, models.UserTypeMerchant)
+		// Process the transaction
+		processedTx, err := s.transactionService.ProcessTransaction(tx)
+		if err != nil {
+			return err
+		}
+		result = processedTx
 
-	// Update merchant stats
-	merchant.TotalTransactions++
-	merchant.TotalVolume += amount
-	merchant.MonthlyVolume += amount
-	merchant.ProcessingFeeRate = fee / amount * 100 // Convert to percentage
+		// Update merchant statistics
+		merchant.TotalTransactions++
+		merchant.TotalVolume += tx.Amount
+		return dbTx.Save(&merchant).Error
+	})
 
-	return repositories.DB.Save(&merchant).Error
+	return result, err
 }
 
 func calculateInitialRiskScore(merchant *models.Merchant) float64 {
@@ -144,4 +108,19 @@ func determineComplianceLevel(riskScore float64) string {
 	default:
 		return "high_risk"
 	}
+}
+
+func (s *MerchantService) GetMerchant(userID uint) (*models.Merchant, error) {
+	return repositories.GetMerchantByUserID(userID)
+}
+
+func (s *MerchantService) UpdateMerchant(merchant *models.Merchant) error {
+	updates := map[string]interface{}{
+		"business_name":    merchant.BusinessName,
+		"business_type":    merchant.BusinessType,
+		"business_address": merchant.BusinessAddress,
+		"is_active":        merchant.IsActive,
+	}
+
+	return repositories.DB.Model(merchant).Updates(updates).Error
 }

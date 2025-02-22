@@ -18,47 +18,60 @@ func SetupRoutes(app *fiber.App) {
 	api.Post("/login", LoginUser)
 	api.Post("/refresh", RefreshToken)
 
-	// User routes (requires any authenticated user)
-	user := api.Group("/", middleware.AuthMiddleware)
-	user.Use(middleware.Protected())
+	// User routes with authentication
+	authenticated := api.Group("/", middleware.AuthMiddleware)
 
 	// Wallet routes
-	user.Post("/wallet", middleware.HasPermission(models.PermissionWalletRead), GetWallet)
-	user.Post("/wallet/topup", middleware.HasPermission(models.PermissionWalletWrite), TopUpWallet)
-	user.Post("/wallet/withdraw", middleware.HasPermission(models.PermissionWalletWrite), WithdrawToCard)
+	wallet := authenticated.Group("/wallet")
+	wallet.Get("/", middleware.HasPermission(models.PermissionWalletRead), GetWallet)
+	wallet.Post("/topup", middleware.HasPermission(models.PermissionWalletWrite), TopUpWallet)
+	wallet.Post("/withdraw", middleware.HasPermission(models.PermissionWalletWrite), WithdrawToCard)
+
+	// Also add the direct wallet endpoint
+	authenticated.Get("/wallet", middleware.HasPermission(models.PermissionWalletRead), GetWallet)
 
 	// Transaction routes
-	user.Post("/transaction", middleware.HasPermission(models.PermissionTransactionWrite), ProcessTransaction)
-	user.Get("/transactions", middleware.HasPermission(models.PermissionTransactionRead), GetUserTransactions)
+	authenticated.Get("/transactions", GetUserTransactions)
+	authenticated.Post("/transaction", ProcessTransaction)
 
 	// Other user routes
-	user.Post("/credit-card", middleware.HasPermission(models.PermissionCreditCardWrite), LinkCreditCard)
-	user.Post("/change-password", middleware.HasPermission(models.PermissionChangePassword), ChangePassword)
-	user.Post("/refresh", RefreshToken)
-	user.Post("/logout", LogoutUser)
+	authenticated.Post("/credit-card", LinkCreditCard)
+	authenticated.Post("/change-password", ChangePassword)
+	authenticated.Post("/refresh", RefreshToken)
+	authenticated.Post("/logout", LogoutUser)
 
-	// Merchant routes (requires merchant role)
-	merchant := api.Group("/merchant", middleware.AuthMiddleware)
-	merchant.Use(middleware.Protected())
+	// Initialize handlers
+	paymentHandler := NewPaymentHandler()
 	merchantHandler := NewMerchantHandler()
+	enterpriseHandler := NewEnterpriseHandler()
 
-	// Merchant management
+	// Merchant routes
+	merchant := authenticated.Group("/merchant")
 	merchant.Post("/", merchantHandler.CreateMerchant)
+
+	// Use existing paymentHandler
+	merchant.Post("/qr", middleware.HasPermission(models.PermissionMerchantTransaction), paymentHandler.GenerateQRCode)
+	merchant.Post("/qr/dynamic", middleware.HasPermission(models.PermissionMerchantTransaction), paymentHandler.GenerateQRCode)
+	merchant.Post("/qr/static", middleware.HasPermission(models.PermissionMerchantTransaction), paymentHandler.GenerateQRCode)
+
+	// Other merchant routes that need merchant permissions
 	merchant.Get("/profile", middleware.HasPermission(models.PermissionMerchantRead), merchantHandler.GetMerchantProfile)
 	merchant.Put("/profile", middleware.HasPermission(models.PermissionMerchantWrite), merchantHandler.UpdateMerchantProfile)
 
 	// Merchant transactions
-	merchant.Post("/:merchantId/transaction", middleware.HasPermission(models.PermissionMerchantTransaction), merchantHandler.ProcessTransaction)
+	merchant.Post("/transaction", middleware.HasPermission(models.PermissionMerchantTransaction), merchantHandler.ProcessTransaction)
 	merchant.Get("/:merchantId/transactions", middleware.HasPermission(models.PermissionMerchantRead), merchantHandler.GetMerchantTransactions)
 
 	// Merchant settings
 	merchant.Post("/:merchantId/apikey", middleware.HasPermission(models.PermissionMerchantWrite), merchantHandler.GenerateAPIKey)
 	merchant.Post("/:merchantId/webhook", middleware.HasPermission(models.PermissionMerchantWrite), merchantHandler.SetWebhookURL)
 
+	// Move these into the authenticated group
+	authenticated.Post("/qr/dynamic", paymentHandler.GenerateQRCode)
+	authenticated.Post("/payment/qr", paymentHandler.ProcessQRPayment)
+
 	// Enterprise routes (requires enterprise role)
-	enterprise := api.Group("/enterprise", middleware.AuthMiddleware)
-	enterprise.Use(middleware.Protected())
-	enterpriseHandler := NewEnterpriseHandler()
+	enterprise := authenticated.Group("/enterprise")
 	enterprise.Post("/", enterpriseHandler.CreateEnterprise)
 	enterprise.Post("/:enterpriseId/apikey", enterpriseHandler.GenerateAPIKey)
 

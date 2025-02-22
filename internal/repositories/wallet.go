@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/url"
 	"orus/internal/models"
 	"strconv"
@@ -49,24 +50,27 @@ func cacheSetWallet(key string, wallet *models.Wallet, expiration time.Duration)
 
 func GetWalletByUserID(userID uint) (*models.Wallet, error) {
 	cacheKey := getWalletCacheKeyByUserID(userID)
+
+	// Try cache first
 	cachedWallet, err := cacheGetWallet(cacheKey)
 	if err == nil {
 		log.Printf("Cache hit for wallet user ID: %d", userID)
 		return cachedWallet, nil
 	}
-	if err != redis.Nil {
-		log.Printf("Cache error for user ID %d: %v", userID, err)
-	}
 
+	// Cache miss, query DB
 	var wallet models.Wallet
-	err = DB.Where("user_id = ?", userID).First(&wallet).Error
-	if err != nil {
+	if err := DB.Where("user_id = ?", userID).First(&wallet).Error; err != nil {
 		return nil, err
 	}
 
+	// Ensure balance is properly rounded to 2 decimal places
+	wallet.Balance = math.Round(wallet.Balance*100) / 100
+
+	// Update cache async
 	go func() {
 		if err := cacheSetWallet(cacheKey, &wallet, walletCacheExpiration); err != nil {
-			log.Printf("Failed to cache wallet for user %d: %v", userID, err)
+			log.Printf("Failed to cache wallet: %v", err)
 		}
 	}()
 
@@ -117,23 +121,16 @@ func GetWalletByQRCodeID(qrCodeID string) (*models.Wallet, error) {
 }
 
 func CreateWallet(wallet *models.Wallet) error {
-	if wallet.QRCodeID == "" {
-		wallet.QRCodeID = generateQRCode(wallet.UserID)
-	}
 	err := DB.Create(wallet).Error
 	if err != nil {
 		return err
 	}
 
-	cacheKeyUser := getWalletCacheKeyByUserID(wallet.UserID)
-	cacheKeyQR := getWalletCacheKeyByQRCodeID(wallet.QRCodeID)
-
+	// Cache only by user ID now
+	cacheKey := getWalletCacheKeyByUserID(wallet.UserID)
 	go func() {
-		if err := cacheSetWallet(cacheKeyUser, wallet, walletCacheExpiration); err != nil {
+		if err := cacheSetWallet(cacheKey, wallet, walletCacheExpiration); err != nil {
 			log.Printf("Failed to cache wallet for user %d: %v", wallet.UserID, err)
-		}
-		if err := cacheSetWallet(cacheKeyQR, wallet, walletCacheExpiration); err != nil {
-			log.Printf("Failed to cache wallet by QR code %s: %v", wallet.QRCodeID, err)
 		}
 	}()
 
@@ -223,4 +220,27 @@ func GetWalletsPaginated(limit, offset int) ([]models.Wallet, int64, error) {
 	}
 
 	return wallets, total, nil
+}
+
+func GetWalletByUserIDForUpdate(userID uint) (*models.Wallet, error) {
+	var wallet models.Wallet
+	if err := DB.Set("gorm:for_update", true).Where("user_id = ?", userID).First(&wallet).Error; err != nil {
+		return nil, err
+	}
+	return &wallet, nil
+}
+
+func UpdateWalletBalance(tx *gorm.DB, walletID uint, newBalance float64) error {
+	// Round to 2 decimal places
+	newBalance = math.Round(newBalance*100) / 100
+
+	return tx.Model(&models.Wallet{}).
+		Where("id = ?", walletID).
+		Update("balance", newBalance).Error
+}
+
+func ResetWalletBalance(userID uint) error {
+	return DB.Model(&models.Wallet{}).
+		Where("user_id = ?", userID).
+		Update("balance", 0).Error
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"orus/internal/models"
+	"orus/internal/utils"
 	"strconv"
 	"time"
 
@@ -108,53 +109,99 @@ func GetUserByPhone(phone string) (*models.User, error) {
 	return &user, nil
 }
 
-func CreateUser(user *models.User) error {
-	return DB.Transaction(func(tx *gorm.DB) error {
-		// Check for existing user
-		var existingUser models.User
-		if err := tx.Where("email = ? OR phone = ?", user.Email, user.Phone).First(&existingUser).Error; err != nil {
-			if err != gorm.ErrRecordNotFound {
-				return fmt.Errorf("error checking existing user: %w", err)
-			}
-		} else {
-			return fmt.Errorf("user with this email or phone already exists")
-		}
+func CreateUser(user *models.User) (*models.User, *models.QRCode, error) {
+	// Standardize role/type mapping
+	if user.Role == "user" {
+		user.Role = "regular"
+	}
+	user.UserType = user.Role // Make UserType match Role for consistency
 
-		// Create user first with null wallet_id
-		user.WalletID = nil
+	var qrCode *models.QRCode
+
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		// Create user
 		if err := tx.Create(user).Error; err != nil {
-			return fmt.Errorf("failed to create user: %w", err)
+			return err
 		}
 
-		// Create wallet
+		// Create wallet with proper linking
 		wallet := &models.Wallet{
 			UserID:   user.ID,
 			Balance:  0,
 			Currency: "USD",
-			QRCodeID: fmt.Sprintf("orus://pay?user_id=%d", user.ID),
 		}
 		if err := tx.Create(wallet).Error; err != nil {
-			return fmt.Errorf("failed to create wallet: %w", err)
+			return err
 		}
 
-		// Update user's wallet_id
-		walletIDUint := uint(wallet.ID)
-		user.WalletID = &walletIDUint
-		if err := tx.Model(user).Update("wallet_id", wallet.ID).Error; err != nil {
-			return fmt.Errorf("failed to update user with wallet: %w", err)
+		// Update user with wallet ID
+		user.WalletID = &wallet.ID
+		if err := tx.Save(user).Error; err != nil {
+			return err
 		}
 
-		// Invalidate all possible cache keys for this user
-		go func() {
-			RedisClient.Del(RedisCtx,
-				getUserCacheKeyByID(user.ID),
-				GetUserCacheKeyByEmail(user.Email),
-				GetUserCacheKeyByPhone(user.Phone),
-			)
-		}()
+		// Create merchant profile if needed
+		if user.Role == "merchant" {
+			merchant := &models.Merchant{
+				UserID:          user.ID,
+				BusinessName:    fmt.Sprintf("Business-%d", user.ID),
+				BusinessType:    "unspecified",
+				BusinessAddress: "pending",
+				IsActive:        true,
+			}
+			if err := tx.Create(merchant).Error; err != nil {
+				return err
+			}
+		}
 
-		return nil
+		// Generate static QR code with proper limits
+		code, err := utils.GenerateSecureCode()
+		if err != nil {
+			return err
+		}
+
+		qrCode = &models.QRCode{
+			Code:     code,
+			UserID:   user.ID,
+			UserType: user.Role, // Use standardized role
+			Type:     "static",
+			Status:   "active",
+			MaxUses:  -1,
+		}
+
+		// Set limits based on role
+		if user.Role == "merchant" {
+			dailyLimit := float64(10000)
+			monthlyLimit := float64(100000)
+			qrCode.DailyLimit = &dailyLimit
+			qrCode.MonthlyLimit = &monthlyLimit
+		} else {
+			dailyLimit := float64(1000)
+			monthlyLimit := float64(5000)
+			qrCode.DailyLimit = &dailyLimit
+			qrCode.MonthlyLimit = &monthlyLimit
+		}
+
+		return tx.Create(qrCode).Error
 	})
+
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Invalidate any existing cache entries
+	cacheKeyEmail := GetUserCacheKeyByEmail(user.Email)
+	cacheKeyPhone := GetUserCacheKeyByPhone(user.Phone)
+	cacheKeyID := getUserCacheKeyByID(user.ID)
+	RedisClient.Del(RedisCtx, cacheKeyEmail, cacheKeyPhone, cacheKeyID)
+
+	// Fetch fresh user data from DB
+	freshUser, err := GetUserByID(user.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return freshUser, qrCode, nil
 }
 
 // internal/repositories/user.go

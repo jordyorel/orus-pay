@@ -90,16 +90,19 @@ func AdminAuthMiddleware(c *fiber.Ctx) error {
 // HasPermission middleware checks if the user has a specific permission
 func HasPermission(permission string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		claims, ok := c.Locals("claims").(*models.UserClaims)
-		if !ok {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid claims"})
+		claims := c.Locals("claims").(*models.UserClaims)
+
+		// Debug logging
+		log.Printf("Checking permission: %s", permission)
+		log.Printf("User claims: %+v", claims)
+
+		if claims.HasPermission(permission) {
+			return c.Next()
 		}
 
-		if !claims.HasPermission(permission) {
-			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "Insufficient permissions"})
-		}
-
-		return c.Next()
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error": "Insufficient permissions",
+		})
 	}
 }
 

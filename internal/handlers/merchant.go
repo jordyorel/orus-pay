@@ -5,8 +5,12 @@ import (
 	"orus/internal/repositories"
 	"orus/internal/services"
 
+	"fmt"
+	"log"
+	"strings"
+	"time"
+
 	"github.com/gofiber/fiber/v2"
-	"gorm.io/gorm"
 )
 
 type MerchantHandler struct {
@@ -20,123 +24,111 @@ func NewMerchantHandler() *MerchantHandler {
 }
 
 func (h *MerchantHandler) CreateMerchant(c *fiber.Ctx) error {
+	userID := c.Locals("userID").(uint)
+
+	var merchant models.Merchant
+	if err := c.BodyParser(&merchant); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Invalid request format",
+		})
+	}
+
+	merchant.UserID = userID
+	merchant.Status = "pending"
+	merchant.APIKey = services.GenerateAPIKey() // Generate unique API key
+	merchant.VerificationStatus = "pending"
+
+	// Create the merchant profile
+	if err := repositories.CreateMerchant(&merchant); err != nil {
+		log.Printf("Failed to create merchant: %v", err)
+		if strings.Contains(err.Error(), "duplicate key") {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+				"error": "Merchant profile already exists for this user",
+			})
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Failed to create merchant profile",
+		})
+	}
+
+	// Create default merchant limits
+	limits := models.MerchantLimits{
+		MerchantID:              merchant.ID,
+		DailyTransactionLimit:   10000.0,  // Default daily limit
+		MonthlyTransactionLimit: 100000.0, // Default monthly limit
+		MinTransactionAmount:    1.0,      // Minimum transaction amount
+		MaxTransactionAmount:    1000.0,   // Maximum transaction amount
+	}
+
+	if err := repositories.DB.Create(&limits).Error; err != nil {
+		log.Printf("Failed to create merchant limits: %v", err)
+		// Don't fail the request, just log the error
+	}
+
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+		"message":  "Merchant profile created successfully",
+		"merchant": merchant,
+	})
+}
+
+func (h *MerchantHandler) ProcessTransaction(c *fiber.Ctx) error {
+	claims := c.Locals("claims").(*models.UserClaims)
+	merchantUserID := claims.UserID
+
 	var input struct {
-		UserID             uint   `json:"user_id"`
-		BusinessName       string `json:"business_name"`
-		BusinessType       string `json:"business_type"`
-		BusinessAddress    string `json:"business_address"`
-		BusinessID         string `json:"business_id"`
-		TaxID              string `json:"tax_id"`
-		Website            string `json:"website,omitempty"`
-		MerchantCategory   string `json:"merchant_category"`
-		LegalEntityType    string `json:"legal_entity_type"`
-		RegistrationNumber string `json:"registration_number"`
-		YearEstablished    int    `json:"year_established,omitempty"`
-		SupportEmail       string `json:"support_email"`
-		SupportPhone       string `json:"support_phone"`
+		Amount      float64 `json:"amount" validate:"required"`
+		CustomerID  uint    `json:"customer_id" validate:"required"`
+		Description string  `json:"description"`
+		PaymentType string  `json:"payment_type"`
 	}
 
 	if err := c.BodyParser(&input); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Invalid request body",
+			"error": "Invalid request format",
 		})
 	}
 
-	// Validate all required fields
-	requiredFields := map[string]string{
-		"business_name":       input.BusinessName,
-		"business_type":       input.BusinessType,
-		"business_address":    input.BusinessAddress,
-		"business_id":         input.BusinessID,
-		"tax_id":              input.TaxID,
-		"merchant_category":   input.MerchantCategory,
-		"legal_entity_type":   input.LegalEntityType,
-		"registration_number": input.RegistrationNumber,
-		"support_email":       input.SupportEmail,
-		"support_phone":       input.SupportPhone,
+	transaction := &models.Transaction{
+		TransactionID: fmt.Sprintf("TX-%d-%d", time.Now().Unix(), input.CustomerID),
+		Type:          models.TransactionTypeMerchantDirect,
+		SenderID:      input.CustomerID,
+		ReceiverID:    merchantUserID,
+		Amount:        input.Amount,
+		Description:   input.Description,
+		PaymentType:   input.PaymentType,
+		MerchantID:    &merchantUserID,
+		Status:        "pending",
+		Currency:      "USD",
 	}
 
-	for field, value := range requiredFields {
-		if value == "" {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error": field + " is required",
-			})
-		}
-	}
-
-	// Check if user exists and has merchant role
-	user, err := repositories.GetUserByID(input.UserID)
+	processedTx, err := h.merchantService.ProcessTransaction(transaction)
 	if err != nil {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"error": "User not found",
-		})
-	}
-
-	if user.Role != "merchant" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "User must have merchant role",
-		})
-	}
-
-	// Check if merchant already exists for this user
-	_, err = repositories.GetMerchantByUserID(input.UserID)
-	if err == nil {
-		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
-			"error": "Merchant profile already exists for this user",
-		})
-	}
-	if err != gorm.ErrRecordNotFound {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Failed to check existing merchant",
-		})
-	}
-
-	// Create merchant with all fields
-	merchant := &models.Merchant{
-		UserID:             input.UserID,
-		BusinessName:       input.BusinessName,
-		BusinessType:       input.BusinessType,
-		BusinessAddress:    input.BusinessAddress,
-		BusinessID:         input.BusinessID,
-		TaxID:              input.TaxID,
-		Website:            input.Website,
-		MerchantCategory:   input.MerchantCategory,
-		LegalEntityType:    input.LegalEntityType,
-		RegistrationNumber: input.RegistrationNumber,
-		YearEstablished:    input.YearEstablished,
-		SupportEmail:       input.SupportEmail,
-		SupportPhone:       input.SupportPhone,
-		VerificationStatus: "pending_review",
-		ProcessingFeeRate:  2.5,
-	}
-
-	if err := h.merchantService.CreateMerchant(merchant); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": err.Error(),
 		})
 	}
 
-	return c.Status(fiber.StatusCreated).JSON(merchant)
-}
-
-func (h *MerchantHandler) ProcessTransaction(c *fiber.Ctx) error {
-	var req struct {
-		Amount float64 `json:"amount"`
-	}
-	if err := c.BodyParser(&req); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
-	}
-
-	merchantID, err := c.ParamsInt("merchantId")
+	// Get merchant details
+	merchant, err := repositories.GetMerchantByUserID(merchantUserID)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid merchant ID"})
+		log.Printf("Failed to get merchant details: %v", err)
+		// Return response without merchant details
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{
+			"message":     "Transaction processed successfully",
+			"transaction": processedTx,
+		})
 	}
 
-	if err := h.merchantService.ProcessTransaction(uint(merchantID), req.Amount); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
-	}
-
-	return c.Status(fiber.StatusOK).JSON(fiber.Map{"message": "Transaction processed successfully"})
+	// Only include merchant details if we successfully got them
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"message":     "Transaction processed successfully",
+		"transaction": processedTx,
+		"merchant": fiber.Map{
+			"id":            merchantUserID,
+			"business_name": merchant.BusinessName,
+			"business_type": merchant.BusinessType,
+		},
+	})
 }
 
 func (h *MerchantHandler) GetMerchantProfile(c *fiber.Ctx) error {
@@ -235,5 +227,31 @@ func (h *MerchantHandler) SetWebhookURL(c *fiber.Ctx) error {
 
 	return c.JSON(fiber.Map{
 		"message": "Webhook URL updated successfully",
+	})
+}
+
+func (h *MerchantHandler) GenerateQRCode(c *fiber.Ctx) error {
+	claims := c.Locals("claims").(*models.UserClaims)
+
+	var input struct {
+		Amount *float64 `json:"amount"`
+		Type   string   `json:"type"` // "static" or "dynamic"
+	}
+
+	if err := c.BodyParser(&input); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Invalid request format",
+		})
+	}
+
+	qrCode, err := services.NewQRService().GenerateQRCode(claims.UserID, "merchant", input.Type, input.Amount)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": err.Error(),
+		})
+	}
+
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+		"qr_code": qrCode,
 	})
 }

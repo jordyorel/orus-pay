@@ -12,6 +12,16 @@ import (
 	qrcode "github.com/skip2/go-qrcode"
 )
 
+type PaymentHandler struct {
+	qrService *services.QRService
+}
+
+func NewPaymentHandler() *PaymentHandler {
+	return &PaymentHandler{
+		qrService: services.NewQRService(),
+	}
+}
+
 // Generate a QR code for payment request
 func GeneratePaymentQR(c *fiber.Ctx) error {
 	userID, ok := c.Locals("userID").(uint)
@@ -154,5 +164,71 @@ func ProcessPaymentQR(c *fiber.Ctx) error {
 			"status":      transaction.Status,
 		},
 		"updated_balance": payerWallet.Balance,
+	})
+}
+
+// GenerateQRCode generates a dynamic QR code
+func (h *PaymentHandler) GenerateQRCode(c *fiber.Ctx) error {
+	var input struct {
+		Amount float64 `json:"amount" validate:"required,gt=0"`
+	}
+
+	if err := c.BodyParser(&input); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Invalid request body",
+		})
+	}
+
+	claims := c.Locals("claims").(*models.UserClaims)
+	qr, err := h.qrService.GenerateDynamicQRCode(claims.UserID, claims.Role, input.Amount)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": err.Error(),
+		})
+	}
+
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+		"qr_code": qr,
+	})
+}
+
+// ProcessQRPayment processes a payment using a QR code
+func (h *PaymentHandler) ProcessQRPayment(c *fiber.Ctx) error {
+	var input struct {
+		QRCode string  `json:"qr_code"`
+		Amount float64 `json:"amount"`
+	}
+
+	if err := c.BodyParser(&input); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Invalid request body",
+		})
+	}
+
+	if input.QRCode == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "QR code is required",
+		})
+	}
+
+	if input.Amount <= 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Amount must be greater than 0",
+		})
+	}
+
+	// Get customer ID from authenticated user
+	claims := c.Locals("claims").(*models.UserClaims)
+
+	tx, err := h.qrService.ProcessQRPayment(input.QRCode, claims.UserID, input.Amount)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": err.Error(),
+		})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"transaction": tx,
+		"message":     "Payment processed successfully",
 	})
 }

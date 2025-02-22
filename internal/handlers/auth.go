@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"log"
 	"orus/internal/config"
 	"orus/internal/models"
@@ -63,6 +64,10 @@ func LoginUser(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Internal server error"})
 	}
 
+	// Log the permissions being set (for debugging)
+	permissions := models.GetDefaultPermissions(user.Role)
+	log.Printf("Setting permissions for role %s: %v", user.Role, permissions)
+
 	setAuthCookies(c, accessToken, refreshToken)
 
 	return c.JSON(fiber.Map{
@@ -72,7 +77,7 @@ func LoginUser(c *fiber.Ctx) error {
 			"id":          user.ID,
 			"email":       user.Email,
 			"role":        user.Role,
-			"permissions": models.GetDefaultPermissions(user.Role),
+			"permissions": permissions,
 		},
 	})
 }
@@ -215,10 +220,16 @@ func getUserByIdentifier(email, phone string) (*models.User, error) {
 }
 
 func generateTokens(user *models.User) (string, string, error) {
-	jwtSecret := os.Getenv("JWT_SECRET")
+	jwtSecret := config.GetEnv("JWT_SECRET", "")
 	if jwtSecret == "" {
-		log.Fatal("Missing JWT_SECRET environment variable")
+		return "", "", errors.New("JWT_SECRET not set")
 	}
+
+	permissions := models.GetDefaultPermissions(user.Role)
+
+	// Debug logging
+	log.Printf("Generating tokens for user %d with role %s", user.ID, user.Role)
+	log.Printf("Permissions: %v", permissions)
 
 	now := time.Now()
 	accessClaims := &models.UserClaims{
@@ -231,7 +242,7 @@ func generateTokens(user *models.User) (string, string, error) {
 		UserID:       user.ID,
 		Email:        user.Email,
 		Role:         user.Role,
-		Permissions:  models.GetDefaultPermissions(user.Role),
+		Permissions:  permissions,
 		TokenVersion: user.TokenVersion,
 	}
 	accessToken, err := jwt.NewWithClaims(jwt.SigningMethodHS256, accessClaims).SignedString([]byte(jwtSecret))

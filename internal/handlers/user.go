@@ -82,7 +82,8 @@ func RegisterUser(c *fiber.Ctx) error {
 		}(),
 	}
 
-	if err := repositories.CreateUser(user); err != nil {
+	createdUser, qrCode, err := repositories.CreateUser(user)
+	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": err.Error(),
 		})
@@ -90,14 +91,19 @@ func RegisterUser(c *fiber.Ctx) error {
 
 	// For merchant role, return instructions
 	if input.Role == "merchant" {
-		user.Password = ""
+		createdUser.Password = ""
 		return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-			"user":      user,
+			"user":      createdUser,
 			"message":   "Please complete your merchant profile by sending a POST request to /api/merchant with your business details",
 			"next_step": "/api/merchant",
+			"static_qr": qrCode,
 		})
 	}
 
-	user.Password = ""
-	return c.Status(fiber.StatusCreated).JSON(user)
+	createdUser.Password = ""
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+		"message":   "User registered successfully",
+		"user":      createdUser,
+		"static_qr": qrCode,
+	})
 }
