@@ -6,6 +6,13 @@ import (
 	"gorm.io/gorm"
 )
 
+const (
+	QRTypeStatic      = "static"  // For receiving payments
+	QRTypeDynamic     = "dynamic" // For receiving specific amount
+	QRTypePayment     = "payment" // For making payments (user shows this)
+	QRTypePaymentCode = "payment" // Alias for payment type
+)
+
 type QRCode struct {
 	gorm.Model
 	Code           string `gorm:"uniqueIndex;not null"`

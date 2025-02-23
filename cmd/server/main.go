@@ -19,6 +19,14 @@ func main() {
 
 	// Initialize databases (PostgreSQL + Redis)
 	repositories.InitDB()
+
+	// Clear Redis cache on startup
+	if err := repositories.RedisClient.FlushAll(repositories.RedisCtx).Err(); err != nil {
+		log.Printf("⚠️ Failed to clear Redis cache on startup: %v", err)
+	} else {
+		log.Println("✅ Redis cache cleared on startup")
+	}
+
 	defer func() {
 		// Close PostgreSQL connection
 		if repositories.DB != nil {
@@ -44,13 +52,6 @@ func main() {
 	app := fiber.New()
 
 	// CORS middleware
-	// app.Use(cors.New(cors.Config{
-	// 	AllowOrigins:     "https://example.com, https://anotherdomain.com", // Add allowed origins
-	// 	AllowHeaders:     "Origin, Content-Type, Accept, Authorization",
-	// 	AllowMethods:     "GET, POST, PUT, DELETE, OPTIONS",
-	// 	AllowCredentials: true, // Set to true if you're using cookies or Authorization headers
-	// }))
-
 	app.Use(cors.New(cors.Config{
 		AllowOrigins:     "http://localhost:5173",
 		AllowHeaders:     "Origin, Content-Type, Accept, Authorization",

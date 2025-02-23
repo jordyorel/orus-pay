@@ -6,6 +6,9 @@ import (
 	"math"
 	"orus/internal/models"
 	"orus/internal/repositories"
+	"time"
+
+	"gorm.io/gorm"
 )
 
 var (
@@ -84,5 +87,37 @@ func (s *TransactionService) ProcessTransaction(tx *models.Transaction) (*models
 		return nil, err
 	}
 
+	return tx, nil
+}
+
+func (s *TransactionService) ProcessP2PTransfer(senderID, receiverID uint, amount float64, description string) (*models.Transaction, error) {
+	tx := &models.Transaction{
+		TransactionID: fmt.Sprintf("TX-%d-%d", time.Now().Unix(), senderID),
+		Type:          "P2P_TRANSFER",
+		SenderID:      senderID,
+		ReceiverID:    receiverID,
+		Amount:        amount,
+		Description:   description,
+		Status:        "pending",
+	}
+
+	// Process in DB transaction
+	err := repositories.DB.Transaction(func(db *gorm.DB) error {
+		// Debit sender
+		if err := NewWalletService().Debit(senderID, amount); err != nil {
+			return err
+		}
+		// Credit receiver
+		if err := NewWalletService().Credit(receiverID, amount); err != nil {
+			return err
+		}
+		// Record transaction
+		tx.Status = "completed"
+		return db.Create(tx).Error
+	})
+
+	if err != nil {
+		return nil, err
+	}
 	return tx, nil
 }

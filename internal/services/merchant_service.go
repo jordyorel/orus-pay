@@ -2,7 +2,6 @@ package services
 
 import (
 	"errors"
-	"fmt"
 	"log"
 	"orus/internal/models"
 	"orus/internal/repositories"
@@ -17,12 +16,14 @@ var (
 type MerchantService struct {
 	feeCalculator      *FeeCalculator
 	transactionService *TransactionService
+	walletService      *WalletService
 }
 
 func NewMerchantService() *MerchantService {
 	return &MerchantService{
 		feeCalculator:      NewFeeCalculator(),
 		transactionService: NewTransactionService(),
+		walletService:      NewWalletService(),
 	}
 }
 
@@ -55,32 +56,62 @@ func (s *MerchantService) UpdateLimits(merchantID uint, limits models.MerchantLi
 }
 
 func (s *MerchantService) ProcessTransaction(tx *models.Transaction) (*models.Transaction, error) {
-	var result *models.Transaction
-	err := repositories.DB.Transaction(func(dbTx *gorm.DB) error {
-		// Get merchant by user_id instead of id
-		var merchant models.Merchant
-		if err := dbTx.Where("user_id = ?", *tx.MerchantID).First(&merchant).Error; err != nil {
-			return fmt.Errorf("merchant not found: %w", err)
-		}
+	// Get merchant details
+	merchant, err := repositories.GetMerchantByUserID(tx.ReceiverID)
+	if err != nil {
+		return nil, err
+	}
 
-		if !merchant.IsActive {
-			return ErrMerchantInactive
-		}
+	// Enrich transaction with merchant details
+	tx.MerchantID = &merchant.ID
+	tx.MerchantName = merchant.BusinessName
+	tx.MerchantCategory = merchant.BusinessType
+	tx.PaymentMethod = "WALLET"
 
-		// Process the transaction
-		processedTx, err := s.transactionService.ProcessTransaction(tx)
-		if err != nil {
+	if tx.Type == models.TransactionTypeMerchantScan {
+		// When merchant scans customer QR
+		tx.PaymentType = "QR_SCAN"
+		// Get customer's payment QR
+		qr, err := repositories.GetUserPaymentQR(tx.SenderID)
+		if err == nil {
+			tx.QRCodeID = qr.Code
+			tx.QRType = qr.Type
+			tx.QROwnerID = qr.UserID
+			tx.QROwnerType = "user"
+		}
+	} else if tx.Type == models.TransactionTypeQRPayment {
+		// When customer scans merchant QR
+		tx.PaymentType = "QR_PAYMENT"
+		// QR details should already be set
+	}
+
+	// Calculate fee
+	fee := s.feeCalculator.CalculateFee(tx.Amount)
+	tx.Fee = fee
+
+	// Process the actual transaction
+	err = repositories.DB.Transaction(func(db *gorm.DB) error {
+		// Debit sender
+		if err := s.walletService.Debit(tx.SenderID, tx.Amount+fee); err != nil {
 			return err
 		}
-		result = processedTx
 
-		// Update merchant statistics
-		merchant.TotalTransactions++
-		merchant.TotalVolume += tx.Amount
-		return dbTx.Save(&merchant).Error
+		// Credit merchant
+		if err := s.walletService.Credit(tx.ReceiverID, tx.Amount); err != nil {
+			// Rollback sender's debit
+			_ = s.walletService.Credit(tx.SenderID, tx.Amount+fee)
+			return err
+		}
+
+		tx.Status = "completed"
+		return db.Save(tx).Error
 	})
 
-	return result, err
+	if err != nil {
+		return nil, err
+	}
+
+	return tx, nil
 }
 
 func calculateInitialRiskScore(merchant *models.Merchant) float64 {

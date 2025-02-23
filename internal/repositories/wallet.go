@@ -2,7 +2,6 @@ package repositories
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -49,31 +48,10 @@ func cacheSetWallet(key string, wallet *models.Wallet, expiration time.Duration)
 }
 
 func GetWalletByUserID(userID uint) (*models.Wallet, error) {
-	cacheKey := getWalletCacheKeyByUserID(userID)
-
-	// Try cache first
-	cachedWallet, err := cacheGetWallet(cacheKey)
-	if err == nil {
-		log.Printf("Cache hit for wallet user ID: %d", userID)
-		return cachedWallet, nil
-	}
-
-	// Cache miss, query DB
 	var wallet models.Wallet
 	if err := DB.Where("user_id = ?", userID).First(&wallet).Error; err != nil {
 		return nil, err
 	}
-
-	// Ensure balance is properly rounded to 2 decimal places
-	wallet.Balance = math.Round(wallet.Balance*100) / 100
-
-	// Update cache async
-	go func() {
-		if err := cacheSetWallet(cacheKey, &wallet, walletCacheExpiration); err != nil {
-			log.Printf("Failed to cache wallet: %v", err)
-		}
-	}()
-
 	return &wallet, nil
 }
 
@@ -138,7 +116,7 @@ func CreateWallet(wallet *models.Wallet) error {
 }
 
 func UpdateWallet(wallet *models.Wallet) error {
-	// Only update balance and updated_at fields
+	log.Printf("Updating wallet for user %d: New Balance = %.2f", wallet.UserID, wallet.Balance)
 	result := DB.Model(wallet).Updates(map[string]interface{}{
 		"balance":    wallet.Balance,
 		"updated_at": time.Now(),
@@ -149,10 +127,7 @@ func UpdateWallet(wallet *models.Wallet) error {
 		return result.Error
 	}
 
-	// Invalidate wallet cache
-	cacheKey := getWalletCacheKeyByUserID(wallet.UserID)
-	RedisClient.Del(RedisCtx, cacheKey)
-
+	log.Printf("Successfully updated wallet for user %d", wallet.UserID)
 	return nil
 }
 
@@ -164,49 +139,16 @@ func TopUpWallet(userID uint, amount float64) error {
 		}
 
 		wallet.Balance += amount
-
-		// Only update balance
-		if err := tx.Model(&wallet).Update("balance", wallet.Balance).Error; err != nil {
+		if err := tx.Save(&wallet).Error; err != nil {
 			return err
 		}
 
 		// Invalidate cache
-		cacheKey := getWalletCacheKeyByUserID(userID)
+		cacheKey := fmt.Sprintf("wallet:user:%d", userID)
 		RedisClient.Del(RedisCtx, cacheKey)
 
 		return nil
 	})
-}
-
-// generateQRCode generates a fixed QR code ID for the wallet
-func generateQRCode(userID uint) string {
-	return "orus://pay?user_id=" + fmt.Sprintf("%d", userID)
-}
-
-func validateCardInput(card models.CreateCreditCard) error {
-	if card.CardNumber == "" {
-		return errors.New("card number is required")
-	}
-	if card.ExpiryMonth == "" || card.ExpiryYear == "" {
-		return errors.New("expiry date is required")
-	}
-
-	month, err := strconv.Atoi(card.ExpiryMonth)
-	if err != nil || month < 1 || month > 12 {
-		return errors.New("invalid expiry month")
-	}
-
-	year, err := strconv.Atoi(card.ExpiryYear)
-	if err != nil {
-		return errors.New("invalid expiry year")
-	}
-
-	now := time.Now()
-	if year < now.Year() || (year == now.Year() && month < int(now.Month())) {
-		return errors.New("card has expired")
-	}
-
-	return nil
 }
 
 func GetWalletsPaginated(limit, offset int) ([]models.Wallet, int64, error) {

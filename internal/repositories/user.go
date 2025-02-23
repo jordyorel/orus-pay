@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	"gorm.io/gorm"
 )
 
 const (
@@ -110,98 +109,59 @@ func GetUserByPhone(phone string) (*models.User, error) {
 }
 
 func CreateUser(user *models.User) (*models.User, *models.QRCode, error) {
-	// Standardize role/type mapping
-	if user.Role == "user" {
-		user.Role = "regular"
+	tx := DB.Begin()
+	if tx.Error != nil {
+		return nil, nil, tx.Error
 	}
-	user.UserType = user.Role // Make UserType match Role for consistency
+	defer tx.Rollback()
 
-	var qrCode *models.QRCode
-
-	err := DB.Transaction(func(tx *gorm.DB) error {
-		// Create user
-		if err := tx.Create(user).Error; err != nil {
-			return err
-		}
-
-		// Create wallet with proper linking
-		wallet := &models.Wallet{
-			UserID:   user.ID,
-			Balance:  0,
-			Currency: "USD",
-		}
-		if err := tx.Create(wallet).Error; err != nil {
-			return err
-		}
-
-		// Update user with wallet ID
-		user.WalletID = &wallet.ID
-		if err := tx.Save(user).Error; err != nil {
-			return err
-		}
-
-		// Create merchant profile if needed
-		if user.Role == "merchant" {
-			merchant := &models.Merchant{
-				UserID:          user.ID,
-				BusinessName:    fmt.Sprintf("Business-%d", user.ID),
-				BusinessType:    "unspecified",
-				BusinessAddress: "pending",
-				IsActive:        true,
-			}
-			if err := tx.Create(merchant).Error; err != nil {
-				return err
-			}
-		}
-
-		// Generate static QR code with proper limits
-		code, err := utils.GenerateSecureCode()
-		if err != nil {
-			return err
-		}
-
-		qrCode = &models.QRCode{
-			Code:     code,
-			UserID:   user.ID,
-			UserType: user.Role, // Use standardized role
-			Type:     "static",
-			Status:   "active",
-			MaxUses:  -1,
-		}
-
-		// Set limits based on role
-		if user.Role == "merchant" {
-			dailyLimit := float64(10000)
-			monthlyLimit := float64(100000)
-			qrCode.DailyLimit = &dailyLimit
-			qrCode.MonthlyLimit = &monthlyLimit
-		} else {
-			dailyLimit := float64(1000)
-			monthlyLimit := float64(5000)
-			qrCode.DailyLimit = &dailyLimit
-			qrCode.MonthlyLimit = &monthlyLimit
-		}
-
-		return tx.Create(qrCode).Error
-	})
-
-	if err != nil {
+	// Create user
+	if err := tx.Create(user).Error; err != nil {
 		return nil, nil, err
 	}
 
-	// Invalidate any existing cache entries
-	cacheKeyEmail := GetUserCacheKeyByEmail(user.Email)
-	cacheKeyPhone := GetUserCacheKeyByPhone(user.Phone)
-	cacheKeyID := getUserCacheKeyByID(user.ID)
-	RedisClient.Del(RedisCtx, cacheKeyEmail, cacheKeyPhone, cacheKeyID)
-
-	// Fetch fresh user data from DB
-	freshUser, err := GetUserByID(user.ID)
-	if err != nil {
+	// Create wallet with explicit 0 balance
+	wallet := &models.Wallet{
+		UserID:   user.ID,
+		Balance:  0.0, // Explicitly set to 0
+		Currency: "USD",
+	}
+	if err := tx.Create(wallet).Error; err != nil {
 		return nil, nil, err
 	}
 
-	return freshUser, qrCode, nil
+	// Create static QR code for receiving payments
+	qrCode := &models.QRCode{
+		Code:     utils.MustGenerateSecureCode(),
+		UserID:   user.ID,
+		UserType: "user",
+		Type:     models.QRTypeStatic,
+		Status:   "active",
+		MaxUses:  -1,
+	}
+
+	// Set limits based on user role
+	if user.Role == "merchant" {
+		dailyLimit := float64(10000)
+		monthlyLimit := float64(100000)
+		qrCode.DailyLimit = &dailyLimit
+		qrCode.MonthlyLimit = &monthlyLimit
+	} else {
+		dailyLimit := float64(1000)
+		monthlyLimit := float64(5000)
+		qrCode.DailyLimit = &dailyLimit
+		qrCode.MonthlyLimit = &monthlyLimit
+	}
+
+	if err := tx.Create(qrCode).Error; err != nil {
+		return nil, nil, err
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		return nil, nil, err
+	}
+
+	return user, qrCode, nil
 }
 
 // internal/repositories/user.go

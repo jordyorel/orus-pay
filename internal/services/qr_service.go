@@ -3,10 +3,13 @@ package services
 import (
 	"errors"
 	"fmt"
+	"log"
 	"orus/internal/models"
 	"orus/internal/repositories"
 	"orus/internal/utils"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 var (
@@ -43,34 +46,35 @@ func (s *QRService) GenerateQRCode(userID uint, userType string, qrType string, 
 		Type:     qrType,
 		Amount:   amount,
 		Status:   "active",
+		MaxUses:  -1, // Default unlimited uses
 	}
 
-	// Set limits based on user type
+	// Only set expiration for dynamic QR codes
 	if qrType == "dynamic" {
 		expires := time.Now().Add(15 * time.Minute)
 		qr.ExpiresAt = &expires
 		qr.MaxUses = 1 // One-time use for dynamic QR
-	} else {
-		qr.MaxUses = -1 // Unlimited uses for static QR
 	}
 
-	// Set basic limits for all users
-	if userType == "regular" || userType == "user" {
+	// Set limits based on user type
+	if userType == "user" {
 		dailyLimit := float64(1000)
 		monthlyLimit := float64(5000)
 		qr.DailyLimit = &dailyLimit
 		qr.MonthlyLimit = &monthlyLimit
-	}
-
-	// Set merchant-specific limits
-	if userType == "merchant" {
+	} else if userType == "merchant" {
 		dailyLimit := float64(10000)
 		monthlyLimit := float64(100000)
 		qr.DailyLimit = &dailyLimit
 		qr.MonthlyLimit = &monthlyLimit
 	}
 
-	return repositories.CreateQRCode(qr)
+	qr, err = repositories.CreateQRCode(qr)
+	if err != nil {
+		return nil, err
+	}
+
+	return qr, nil
 }
 
 // GenerateDynamicQRCode creates a one-time use QR code
@@ -107,154 +111,190 @@ func (s *QRService) GenerateDynamicQRCode(userID uint, userType string, amount f
 		qr.MonthlyLimit = &monthlyLimit
 	}
 
-	return repositories.CreateQRCode(qr)
+	qr, err = repositories.CreateQRCode(qr)
+	if err != nil {
+		return nil, err
+	}
+
+	return qr, nil
 }
 
-func (s *QRService) ProcessQRPayment(code string, customerID uint, amount float64) (*models.Transaction, error) {
+func (s *QRService) ProcessQRPayment(code string, customerID uint, amount float64, metadata map[string]interface{}) (*models.Transaction, error) {
 	qr, err := repositories.GetQRCodeByCodeForUpdate(code)
 	if err != nil {
 		return nil, fmt.Errorf("invalid QR code: %w", err)
 	}
 
-	// Prevent self-payment and validate QR code
-	if customerID == qr.UserID {
-		return nil, errors.New("cannot pay to your own QR code")
+	// Determine sender and receiver based on QR type
+	var senderID, receiverID uint
+	if qr.Type == models.QRTypePayment {
+		// Merchant scanned user's payment QR
+		senderID = qr.UserID    // User pays
+		receiverID = customerID // Merchant receives (customerID is merchant here)
+	} else if qr.Type == models.QRTypeStatic {
+		// User scanned merchant's static QR
+		senderID = customerID  // User pays
+		receiverID = qr.UserID // Merchant receives
+	} else {
+		return nil, fmt.Errorf("unsupported QR type for payment: %s", qr.Type)
 	}
 
-	if err := s.validateQRCode(qr, customerID, amount); err != nil {
-		return nil, err
+	// Validate transaction
+	walletService := NewWalletService()
+	senderWallet, err := walletService.GetWallet(senderID)
+	if err != nil || senderWallet.Balance < amount {
+		return nil, errors.New("insufficient balance")
 	}
 
-	// Create QR transaction record
-	qrTransaction := &models.QRTransaction{
-		QRCodeID:   qr.ID,
-		CustomerID: customerID,
-		Amount:     amount,
-		Status:     "pending",
-	}
-
-	// Start transaction
-	tx := repositories.DB.Begin()
-	if tx.Error != nil {
-		return nil, tx.Error
-	}
-	defer tx.Rollback()
-
-	// Save QR transaction
-	if err := tx.Create(qrTransaction).Error; err != nil {
-		return nil, err
-	}
-
-	// Create and process the payment transaction
-	transaction := &models.Transaction{
-		TransactionID: fmt.Sprintf("TX-%d-%d", time.Now().Unix(), customerID),
-		Type:          "qr_payment",
-		SenderID:      customerID,
-		ReceiverID:    qr.UserID,
+	// Create transaction
+	tx := &models.Transaction{
+		TransactionID: fmt.Sprintf("TX-%d-%d", time.Now().Unix(), senderID),
+		Type:          "QR_PAYMENT",
+		SenderID:      senderID,
+		ReceiverID:    receiverID,
 		Amount:        amount,
-		Status:        "pending",
 		QRCodeID:      qr.Code,
+		QRType:        qr.Type,
+		QROwnerID:     qr.UserID,
+		QROwnerType:   qr.UserType,
+		Status:        "pending",
+		Metadata:      metadata,
 	}
 
-	// Process the transaction
-	processedTx, err := s.transactionService.ProcessTransaction(transaction)
+	// Process in DB transaction
+	err = repositories.DB.Transaction(func(db *gorm.DB) error {
+		if err := walletService.Debit(senderID, amount); err != nil {
+			return err
+		}
+		if err := walletService.Credit(receiverID, amount); err != nil {
+			return err
+		}
+		tx.Status = "completed"
+		return db.Create(tx).Error
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	// Update QR transaction with transaction ID and status
-	now := time.Now()
-	qrTransaction.TransactionID = processedTx.ID
-	qrTransaction.Status = "completed"
-	qrTransaction.CompletedAt = &now
-	if err := tx.Save(qrTransaction).Error; err != nil {
-		return nil, err
-	}
-
-	// Increment QR code usage count
-	qr.UsageCount++
-	if err := tx.Save(qr).Error; err != nil {
-		return nil, err
-	}
-
-	// Commit transaction
-	if err := tx.Commit().Error; err != nil {
-		return nil, err
-	}
-
-	return processedTx, nil
+	return tx, nil
 }
 
-func (s *QRService) validateQRCode(qr *models.QRCode, customerID uint, amount float64) error {
+func (s *QRService) ValidateQRCode(qr *models.QRCode, amount float64) error {
 	if qr.Status != "active" {
 		return ErrQRInactive
 	}
 
-	// Check expiration for dynamic QR codes
-	if qr.Type == "dynamic" {
-		if qr.ExpiresAt != nil && time.Now().After(*qr.ExpiresAt) {
-			return ErrQRExpired
-		}
-	}
-
-	// Check usage limit
-	if qr.MaxUses > 0 && qr.UsageCount >= qr.MaxUses {
-		return ErrQRUsageLimit
-	}
-
-	// For dynamic QR codes, amount must match exactly
-	if qr.Type == "dynamic" && qr.Amount != nil && *qr.Amount != amount {
-		return ErrAmountMismatch
-	}
-
-	// Check daily and monthly limits
-	if qr.DailyLimit != nil || qr.MonthlyLimit != nil {
-		if err := s.checkTransactionLimits(qr, amount); err != nil {
-			return err
-		}
-	}
-
-	// Check allowed customers for merchant QR codes
-	if qr.UserType == "merchant" && len(qr.AllowedCustomers) > 0 {
-		if !contains(qr.AllowedCustomers, customerID) {
-			return ErrUnauthorizedCustomer
-		}
-	}
-
-	return nil
-}
-
-func (s *QRService) checkTransactionLimits(qr *models.QRCode, amount float64) error {
-	if qr.DailyLimit != nil {
-		dailyTotal, err := repositories.GetQRCodeDailyTotal(qr.ID)
+	// For payment QR codes
+	if qr.Type == models.QRTypePayment {
+		// Check if user has sufficient balance
+		wallet, err := repositories.GetWalletByUserID(qr.UserID)
 		if err != nil {
 			return err
 		}
-		if dailyTotal+amount > *qr.DailyLimit {
-			return ErrDailyLimitExceeded
+		if wallet.Balance < amount {
+			return errors.New("insufficient balance")
 		}
+		return nil
 	}
 
-	if qr.MonthlyLimit != nil {
-		monthlyTotal, err := repositories.GetQRCodeMonthlyTotal(qr.ID)
-		if err != nil {
-			return err
-		}
-		if monthlyTotal+amount > *qr.MonthlyLimit {
-			return ErrMonthlyLimitExceeded
-		}
-	}
-
-	return nil
-}
-
-func contains(slice []uint, item uint) bool {
-	for _, i := range slice {
-		if i == item {
-			return true
-		}
-	}
-	return false
+	return errors.New("invalid QR code type")
 }
 
 // Additional helper methods...
+
+func (s *QRService) GeneratePaymentCode(userID uint) (*models.QRCode, error) {
+	// Check if user already has a payment code
+	existingQR, err := repositories.GetUserPaymentQR(userID)
+	if err == nil {
+		return existingQR, nil // Return existing QR if found
+	}
+
+	// Create new payment QR if not found
+	qrCode := &models.QRCode{
+		Code:     utils.MustGenerateSecureCode(),
+		UserID:   userID,
+		UserType: "user",
+		Type:     models.QRTypePayment,
+		Status:   "active",
+		MaxUses:  -1, // Never expires
+	}
+
+	qrCode, err = repositories.CreateQRCode(qrCode)
+	if err != nil {
+		return nil, err
+	}
+
+	return qrCode, nil
+}
+
+func (s *QRService) ValidatePaymentCode(code string) (*models.QRCode, error) {
+	qr, err := repositories.GetQRCodeByCode(code)
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate payment code - check for both payment types
+	if qr.Type != models.QRTypePayment && qr.Type != models.QRTypePaymentCode {
+		return nil, errors.New("invalid QR code type")
+	}
+
+	// Check if active
+	if qr.Status != "active" {
+		return nil, ErrQRInactive
+	}
+
+	// Check if expired (for dynamic codes)
+	if qr.ExpiresAt != nil && time.Now().After(*qr.ExpiresAt) {
+		return nil, ErrQRExpired
+	}
+
+	// Add debug logging
+	log.Printf("Validating QR code: %+v", qr)
+
+	return qr, nil
+}
+
+func (s *QRService) GeneratePaymentQR(userID uint, amount float64) (*models.QRCode, error) {
+	uniqueID, err := utils.GenerateUniqueID(8) // Generate an 8-byte unique ID
+	if err != nil {
+		return nil, err
+	}
+
+	// Create a unique QR Code
+	qrCode := &models.QRCode{
+		Code:     fmt.Sprintf("QR-%d-%s", userID, uniqueID),
+		UserID:   userID,
+		UserType: "user",
+		Type:     models.QRTypeDynamic,
+		Amount:   &amount,
+		Status:   "active",
+		MaxUses:  1, // One-time use
+	}
+
+	// Set expiry (e.g., 15 minutes from now)
+	expires := time.Now().Add(15 * time.Minute)
+	qrCode.ExpiresAt = &expires
+
+	// Create pending transaction
+	tx := &models.Transaction{
+		ReceiverID: userID,
+		Amount:     amount,
+		Status:     "pending",
+		QRCodeID:   qrCode.Code,
+		Type:       models.TransactionTypeQRPayment,
+	}
+
+	// Save both QR and transaction in a DB transaction
+	err = repositories.DB.Transaction(func(db *gorm.DB) error {
+		if err := db.Create(qrCode).Error; err != nil {
+			return err
+		}
+		return db.Create(tx).Error
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	return qrCode, nil
+}

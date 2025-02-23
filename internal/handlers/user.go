@@ -7,6 +7,8 @@ import (
 
 	"orus/internal/utils"
 
+	"orus/internal/services"
+
 	"github.com/gofiber/fiber/v2"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -14,6 +16,16 @@ import (
 // Regular expressions for input validation
 var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
 var phoneRegex = regexp.MustCompile(`^\+?[0-9]{7,15}$`) // Allows optional + and 7-15 digits
+
+type UserHandler struct {
+	qrService *services.QRService
+}
+
+func NewUserHandler() *UserHandler {
+	return &UserHandler{
+		qrService: services.NewQRService(),
+	}
+}
 
 func RegisterUser(c *fiber.Ctx) error {
 	var input struct {
@@ -105,5 +117,52 @@ func RegisterUser(c *fiber.Ctx) error {
 		"message":   "User registered successfully",
 		"user":      createdUser,
 		"static_qr": qrCode,
+	})
+}
+
+func (h *UserHandler) GeneratePaymentCode(c *fiber.Ctx) error {
+	claims := c.Locals("claims").(*models.UserClaims)
+	qrCode, err := h.qrService.GeneratePaymentCode(claims.UserID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": err.Error(),
+		})
+	}
+	return c.JSON(fiber.Map{"qr_code": qrCode})
+}
+
+func (h *UserHandler) GenerateReceiveCode(c *fiber.Ctx) error {
+	claims := c.Locals("claims").(*models.UserClaims)
+	qrCode, err := h.qrService.GenerateQRCode(claims.UserID, "user", "static", nil)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": err.Error(),
+		})
+	}
+	return c.JSON(fiber.Map{"qr_code": qrCode})
+}
+
+func (h *UserHandler) GetReceiveCode(c *fiber.Ctx) error {
+	claims := c.Locals("claims").(*models.UserClaims)
+	qrCode, err := repositories.GetUserStaticQR(claims.UserID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Failed to get receive code",
+		})
+	}
+	return c.JSON(fiber.Map{"qr_code": qrCode})
+}
+
+func (h *UserHandler) GetReceiveQR(c *fiber.Ctx) error {
+	claims := c.Locals("claims").(*models.UserClaims)
+
+	qr, err := services.NewQRService().GeneratePaymentCode(claims.UserID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	return c.JSON(fiber.Map{
+		"qr_code": qr,
+		"message": "Use this QR code to receive payments",
 	})
 }

@@ -8,3 +8,9 @@ type Wallet struct {
 	Balance  float64 `gorm:"default:0"`
 	Currency string  `gorm:"default:'USD'"`
 }
+
+func (w *Wallet) BeforeCreate(tx *gorm.DB) error {
+	// Ensure balance starts at 0
+	w.Balance = 0.0
+	return nil
+}

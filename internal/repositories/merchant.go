@@ -101,3 +101,13 @@ func SetMerchantWebhookURL(merchantID uint, webhookURL string) error {
 	}
 	return nil
 }
+
+func GetMerchantStaticQR(userID uint) (*models.QRCode, error) {
+	var qr models.QRCode
+	err := DB.Where("user_id = ? AND user_type = ? AND type = ?",
+		userID, "merchant", models.QRTypeStatic).First(&qr).Error
+	if err != nil {
+		return nil, err
+	}
+	return &qr, nil
+}

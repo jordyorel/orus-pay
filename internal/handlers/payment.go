@@ -7,18 +7,22 @@ import (
 	"orus/internal/models"
 	"orus/internal/repositories"
 	"orus/internal/services"
+	"orus/internal/utils/response"
+	"orus/internal/utils/validation"
 
 	"github.com/gofiber/fiber/v2"
 	qrcode "github.com/skip2/go-qrcode"
 )
 
 type PaymentHandler struct {
-	qrService *services.QRService
+	qrService          *services.QRService
+	transactionService *services.TransactionService
 }
 
 func NewPaymentHandler() *PaymentHandler {
 	return &PaymentHandler{
-		qrService: services.NewQRService(),
+		qrService:          services.NewQRService(),
+		transactionService: services.NewTransactionService(),
 	}
 }
 
@@ -167,68 +171,118 @@ func ProcessPaymentQR(c *fiber.Ctx) error {
 	})
 }
 
-// GenerateQRCode generates a dynamic QR code
-func (h *PaymentHandler) GenerateQRCode(c *fiber.Ctx) error {
+// ProcessQRPayment handles both merchant and user QR code scanning
+func (h *PaymentHandler) ProcessQRPayment(c *fiber.Ctx) error {
+	claims := c.Locals("claims").(*models.UserClaims)
+
+	var input struct {
+		QRCode      string  `json:"qr_code" validate:"required"`
+		Amount      float64 `json:"amount" validate:"required,gt=0"`
+		Description string  `json:"description"`
+	}
+
+	if err := c.BodyParser(&input); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "Invalid request format"})
+	}
+
+	// Process payment through QR service
+	tx, err := services.NewQRService().ProcessQRPayment(input.QRCode, claims.UserID, input.Amount, map[string]interface{}{
+		"description": input.Description,
+	})
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	return c.JSON(fiber.Map{
+		"message":     "Payment successful",
+		"transaction": tx,
+	})
+}
+
+// SendMoney handles direct user-to-user transfers
+func (h *PaymentHandler) SendMoney(c *fiber.Ctx) error {
+	claims := c.Locals("claims").(*models.UserClaims)
+
+	var input struct {
+		ReceiverID  uint    `json:"receiver_id" validate:"required"`
+		Amount      float64 `json:"amount" validate:"required,gt=0"`
+		Description string  `json:"description"`
+	}
+
+	if err := c.BodyParser(&input); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "Invalid request format"})
+	}
+
+	tx, err := services.NewTransactionService().ProcessP2PTransfer(claims.UserID, input.ReceiverID, input.Amount, input.Description)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	return c.JSON(fiber.Map{
+		"message":     "Transfer successful",
+		"transaction": tx,
+	})
+}
+
+func (h *PaymentHandler) GeneratePaymentQR(c *fiber.Ctx) error {
+	claims := c.Locals("claims").(*models.UserClaims)
+
 	var input struct {
 		Amount float64 `json:"amount" validate:"required,gt=0"`
 	}
 
 	if err := c.BodyParser(&input); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Invalid request body",
-		})
+		return c.Status(400).JSON(fiber.Map{"error": "Invalid request format"})
 	}
 
-	claims := c.Locals("claims").(*models.UserClaims)
-	qr, err := h.qrService.GenerateDynamicQRCode(claims.UserID, claims.Role, input.Amount)
+	qr, err := services.NewQRService().GeneratePaymentQR(claims.UserID, input.Amount)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": err.Error(),
-		})
+		return c.Status(500).JSON(fiber.Map{"error": "Failed to generate QR code"})
 	}
 
-	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+	return c.JSON(fiber.Map{
+		"message": "QR code generated",
 		"qr_code": qr,
+		"amount":  input.Amount,
 	})
 }
 
-// ProcessQRPayment processes a payment using a QR code
-func (h *PaymentHandler) ProcessQRPayment(c *fiber.Ctx) error {
-	var input struct {
-		QRCode string  `json:"qr_code"`
-		Amount float64 `json:"amount"`
+func (h *PaymentHandler) ProcessPayment(c *fiber.Ctx) error {
+	var req models.PaymentRequest
+	if err := c.BodyParser(&req); err != nil {
+		return response.ValidationError(c, "Invalid request format")
 	}
 
-	if err := c.BodyParser(&input); err != nil {
+	v := validation.New()
+	v.Payment(&req) // Use the Payment validation method
+
+	if !v.Valid() {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Invalid request body",
+			"errors": v.Errors,
 		})
 	}
 
-	if input.QRCode == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "QR code is required",
-		})
-	}
-
-	if input.Amount <= 0 {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Amount must be greater than 0",
-		})
-	}
-
-	// Get customer ID from authenticated user
+	// Get user ID from context
 	claims := c.Locals("claims").(*models.UserClaims)
-
-	tx, err := h.qrService.ProcessQRPayment(input.QRCode, claims.UserID, input.Amount)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": err.Error(),
-		})
+	if claims == nil {
+		return response.Unauthorized(c)
 	}
 
-	return c.Status(fiber.StatusOK).JSON(fiber.Map{
-		"transaction": tx,
-		"message":     "Payment processed successfully",
-	})
+	// Create transaction request
+	tx := &models.Transaction{
+		Type:        req.PaymentType,
+		SenderID:    claims.UserID,
+		ReceiverID:  req.RecipientID,
+		Amount:      req.Amount,
+		Description: req.Description,
+		Status:      "pending",
+	}
+
+	// Process transaction
+	result, err := h.transactionService.ProcessTransaction(tx)
+	if err != nil {
+		return response.ServerError(c, err.Error())
+	}
+
+	return response.Success(c, "Payment processed successfully", result)
 }

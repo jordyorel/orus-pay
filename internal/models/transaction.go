@@ -12,27 +12,55 @@ const (
 	TransactionTypeWithdrawal     = "WITHDRAWAL"
 	TransactionTypeQRPayment      = "QR_PAYMENT"
 	TransactionTypeMerchantDirect = "MERCHANT_DIRECT"
+	TransactionTypeMerchantScan   = "MERCHANT_SCAN"
 )
 
 type Transaction struct {
 	gorm.Model
 	TransactionID string `gorm:"unique;not null"`
-	Type          string `gorm:"not null"` // "qr_payment", "transfer", "topup", etc.
+	UserID        uint   `gorm:"index"`    // For direct wallet operations
+	Type          string `gorm:"not null"` // QR_PAYMENT, MERCHANT_SCAN, etc.
 	SenderID      uint   `gorm:"index"`
 	ReceiverID    uint   `gorm:"index"`
 	Amount        float64
 	Fee           float64 `gorm:"default:0"`
 	Currency      string  `gorm:"default:'USD'"`
 	Status        string  `gorm:"default:'pending'"`
-	PaymentMethod string
+	Reference     string  // For tracking related transactions
 	Description   string
-	Metadata      JSON `gorm:"type:jsonb"`
 
-	// For merchant transactions
-	MerchantID  *uint  `gorm:"index"`
-	QRCodeID    string `gorm:"index"` // Added back for QR payments
-	PaymentType string // Added back for different payment types (CARD, TRANSFER, etc.)
-	CardID      *uint  // Added back for card payments
+	// QR specific fields
+	QRCodeID    string `gorm:"index"`
+	QRType      string // static, dynamic, payment
+	QROwnerID   uint   `gorm:"index"`
+	QROwnerType string // user, merchant
+
+	// Payment details
+	PaymentMethod string
+	PaymentType   string // DIRECT, QR_SCAN, CARD
+	CardID        *uint  `gorm:"index"` // For card-based transactions
+
+	// Merchant specific
+	MerchantID       *uint `gorm:"index"`
+	MerchantName     string
+	MerchantCategory string
+
+	// Additional metadata
+	Location   *Location              `gorm:"type:jsonb"`
+	DeviceInfo *DeviceInfo            `gorm:"type:jsonb"`
+	Metadata   map[string]interface{} `gorm:"type:jsonb"`
+}
+
+type Location struct {
+	Latitude  float64
+	Longitude float64
+	Address   string
+}
+
+type DeviceInfo struct {
+	DeviceID   string
+	DeviceType string
+	IPAddress  string
 }
 
 // BeforeCreate hook to generate TransactionID if not set

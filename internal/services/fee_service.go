@@ -4,12 +4,6 @@ import (
 	"orus/internal/models"
 )
 
-type FeeCalculator struct{}
-
-func NewFeeCalculator() *FeeCalculator {
-	return &FeeCalculator{}
-}
-
 func (fc *FeeCalculator) CalculateWithdrawalFee(amount float64, userType models.UserType, instant bool) float64 {
 	feeStructure := models.FeeStructures[userType]
 	fee := amount * (feeStructure.WithdrawalFee / 100)

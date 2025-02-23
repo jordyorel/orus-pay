@@ -34,6 +34,7 @@ func InitDB() error {
 		&models.EnterpriseAPIKey{},
 		&models.QRCode{},
 		&models.QRTransaction{},
+		&models.CreditCard{},
 	)
 
 	return err
@@ -133,4 +134,25 @@ func ResetDatabase() error {
 
 	// Run migrations
 	return DB.AutoMigrate(&models.User{}, &models.Wallet{}, &models.QRCode{} /* other tables */)
+}
+
+func DropAllTables() error {
+	// Drop tables
+	err := DB.Migrator().DropTable(
+		&models.User{},
+		&models.Wallet{},
+		&models.Transaction{},
+		// ... other tables
+	)
+	if err != nil {
+		return err
+	}
+
+	// Clear all Redis cache
+	err = RedisClient.FlushAll(RedisCtx).Err()
+	if err != nil {
+		return err
+	}
+
+	return nil
 }

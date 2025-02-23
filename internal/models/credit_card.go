@@ -19,3 +19,13 @@ type VisaCardToken struct {
 	Expiry   string `json:"expiry"`    // Expiry date in MM/YY format
 	CardType string `json:"card_type"` // Card type (Visa, Mastercard, etc.)
 }
+
+type CreditCard struct {
+	gorm.Model
+	UserID      uint   `gorm:"not null;index"`
+	CardNumber  string `gorm:"not null"`
+	CardType    string `gorm:"not null"`
+	ExpiryMonth string `gorm:"not null"`
+	ExpiryYear  string `gorm:"not null"`
+	Status      string `gorm:"not null;default:'active'"`
+}

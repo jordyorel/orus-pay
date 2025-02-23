@@ -13,3 +13,11 @@ func GenerateSecureCode() (string, error) {
 	}
 	return base64.URLEncoding.EncodeToString(b), nil
 }
+
+func MustGenerateSecureCode() string {
+	code, err := GenerateSecureCode()
+	if err != nil {
+		panic("failed to generate secure code: " + err.Error())
+	}
+	return code
+}

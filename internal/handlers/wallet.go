@@ -4,123 +4,46 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"math"
 	"orus/internal/models"
 	"orus/internal/repositories"
 	"orus/internal/services"
 	"strconv"
 	"time"
 
-	"os"
-
 	"github.com/gofiber/fiber/v2"
-	"github.com/stripe/stripe-go/v72"
 )
 
 // TopUpWallet adds funds to the user's wallet without fees
 func TopUpWallet(c *fiber.Ctx) error {
-	// Extract user ID from JWT
-	userID, ok := c.Locals("userID").(uint)
-	if !ok || userID == 0 {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Unauthorized"})
-	}
-
-	// Parse request body
-	var request struct {
-		Amount   float64 `json:"amount"`
-		CardID   uint    `json:"card_id"`  // ID of the saved card to use
-		Currency string  `json:"currency"` // Optional: defaults to USD
-	}
-
-	if err := c.BodyParser(&request); err != nil {
-		log.Println("Error parsing request body:", err)
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request format"})
-	}
-
-	// Validate amount
-	if request.Amount <= 0 {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid top-up amount"})
-	}
-
-	// Set default currency if not provided
-	if request.Currency == "" {
-		request.Currency = "usd"
-	}
-
-	// Fetch user's wallet
-	wallet, err := repositories.GetWalletByUserID(userID)
-	if err != nil {
-		log.Println("Wallet not found for user:", userID)
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Wallet not found"})
-	}
-
-	// Fetch the card details
-	card, err := repositories.GetCreditCardByID(request.CardID)
-	if err != nil {
-		log.Println("Card not found:", err)
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Card not found"})
-	}
-
-	// Verify card belongs to user
-	if card.UserID != userID {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "Card does not belong to user"})
-	}
-
-	// Create payment intent with Stripe
-	stripe.Key = os.Getenv("STRIPE_SECRET_KEY")
-	// amountInCents := int64(request.Amount * 100) // Convert to cents
-
-	// For test cards, simulate payment processing
-	var paymentStatus string
-	cardNumberStr := fmt.Sprintf("%v", card.CardNumber) // Convert card number to string for comparison
-	switch cardNumberStr {
-	case "tok_visa", "4242424242424242": // Always succeeds
-		paymentStatus = "succeeded"
-	case "tok_visa_declined", "4000000000000002": // Always fails
-		paymentStatus = "failed"
-	case "tok_visa_insufficient_funds", "4000000000009995": // Insufficient funds
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Insufficient funds on card"})
-	default:
-		paymentStatus = "succeeded" // Default to success for other test cards
-	}
-
-	// Create transaction record
-	transaction := &models.Transaction{
-		ReceiverID:  userID,
-		SenderID:    0,              // System transaction
-		Amount:      request.Amount, // No fees on top-up
-		Status:      "pending",
-		Type:        "TOPUP",
-		PaymentType: "CARD",
-		CardID:      &request.CardID,
-		Currency:    request.Currency,
-	}
-
-	// Save the transaction
-	if err := repositories.CreateTransaction(transaction); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Failed to create transaction",
+	claims := c.Locals("claims").(*models.UserClaims)
+	if claims == nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"error": "Unauthorized access",
 		})
 	}
 
-	// Process payment and update wallet
-	if paymentStatus == "succeeded" {
-		transaction.Status = "completed"
-		// Update wallet balance directly without fees
-		wallet.Balance += request.Amount
-		if err := repositories.UpdateWallet(wallet); err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to update wallet"})
-		}
+	var input struct {
+		Amount float64 `json:"amount" validate:"required,gt=0"`
+		CardID uint    `json:"card_id" validate:"required"`
+	}
+
+	if err := c.BodyParser(&input); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Invalid request format",
+		})
+	}
+
+	walletService := services.NewWalletService()
+	err := walletService.TopUp(claims.UserID, input.Amount, input.CardID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": err.Error(),
+		})
 	}
 
 	return c.JSON(fiber.Map{
-		"message":        "Top-up successful",
-		"transaction_id": transaction.ID,
-		"wallet": fiber.Map{
-			"id":       wallet.ID,
-			"balance":  wallet.Balance,
-			"currency": wallet.Currency,
-		},
+		"message": "Top up successful",
+		"amount":  input.Amount,
 	})
 }
 
@@ -269,14 +192,15 @@ func LinkCreditCard(c *fiber.Ctx) error {
 	// Parse JSON body
 	var card models.CreateCreditCard
 	if err := c.BodyParser(&card); err != nil {
-		log.Println("Error parsing request body:", err)
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request format"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Invalid request format",
+		})
 	}
 
-	// Validate input
 	if err := validateCardInput(card); err != nil {
-		log.Println("Validation error:", err)
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": err.Error(),
+		})
 	}
 
 	// Call tokenization service
@@ -286,13 +210,14 @@ func LinkCreditCard(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Card tokenization failed"})
 	}
 
-	// Save tokenized card
-	cardRecord := models.CreateCreditCard{
+	// Convert CreateCreditCard to CreditCard
+	cardRecord := models.CreditCard{
 		UserID:      userID.(uint),
-		CardNumber:  tokenizedCard.Token, // Store the token, not the card number
+		CardNumber:  tokenizedCard.Token,
 		CardType:    tokenizedCard.CardType,
 		ExpiryMonth: card.ExpiryMonth,
 		ExpiryYear:  card.ExpiryYear,
+		Status:      "active",
 	}
 
 	if err := repositories.CreateCreditCard(&cardRecord); err != nil {
@@ -303,7 +228,7 @@ func LinkCreditCard(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"message":   "Credit card linked successfully",
 		"token":     tokenizedCard.Token,
-		"card_type": tokenizedCard.CardType,
+		"card_type": cardRecord.CardType,
 		"expiry":    fmt.Sprintf("%s/%s", card.ExpiryMonth, card.ExpiryYear),
 	})
 }
@@ -346,19 +271,13 @@ func GetWallet(c *fiber.Ctx) error {
 		})
 	}
 
-	// Log the permissions for debugging
-	log.Printf("User permissions: %v", claims.Permissions)
-	log.Printf("Required permission: %v", models.PermissionWalletRead)
-
-	wallet, err := repositories.GetWalletByUserID(claims.UserID)
+	walletService := services.NewWalletService()
+	wallet, err := walletService.GetWallet(claims.UserID)
 	if err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
 			"error": "Wallet not found",
 		})
 	}
-
-	// Ensure balance is properly formatted
-	wallet.Balance = math.Round(wallet.Balance*100) / 100
 
 	return c.JSON(fiber.Map{
 		"wallet": wallet,

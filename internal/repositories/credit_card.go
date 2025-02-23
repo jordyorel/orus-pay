@@ -1,10 +1,11 @@
 package repositories
 
 import (
+	"log"
 	"orus/internal/models"
 )
 
-func CreateCreditCard(card *models.CreateCreditCard) error {
+func CreateCreditCard(card *models.CreditCard) error {
 	return DB.Create(card).Error
 }
 
@@ -21,11 +22,11 @@ func GetCreditCardsPaginated(limit, offset int) ([]models.CreateCreditCard, int6
 	return creditCards, total, nil
 }
 
-func GetCreditCardByID(cardID uint) (*models.CreateCreditCard, error) {
-	var card models.CreateCreditCard
-	result := DB.First(&card, cardID)
-	if result.Error != nil {
-		return nil, result.Error
+func GetCreditCardByID(cardID uint) (*models.CreditCard, error) {
+	var card models.CreditCard
+	if err := DB.Where("id = ?", cardID).First(&card).Error; err != nil {
+		log.Printf("Error fetching card %d: %v", cardID, err)
+		return nil, err
 	}
 	return &card, nil
 }
