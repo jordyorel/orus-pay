@@ -7,18 +7,6 @@ import (
 	"gorm.io/gorm"
 )
 
-type MerchantLimits struct {
-	gorm.Model
-	MerchantID              uint           `gorm:"not null" json:"merchant_id"`
-	DailyTransactionLimit   float64        `gorm:"not null;default:10000" json:"daily_limit"`
-	MonthlyTransactionLimit float64        `gorm:"not null;default:100000" json:"monthly_limit"`
-	SingleTransactionLimit  float64        `gorm:"not null;default:5000" json:"min_transaction"`
-	MinTransactionAmount    float64        `gorm:"not null;default:1" json:"min_transaction_amount"`
-	MaxTransactionAmount    float64        `gorm:"not null;default:5000" json:"max_transaction"`
-	ConcurrentTransactions  int            `gorm:"not null;default:10"`
-	AllowedCurrencies       pq.StringArray `gorm:"type:text[]" json:"allowed_currencies"`
-}
-
 type Merchant struct {
 	gorm.Model
 	UserID             uint   `gorm:"uniqueIndex;not null" json:"user_id"`
@@ -61,11 +49,16 @@ type Merchant struct {
 	Rating            int `gorm:"default:0"`
 
 	// Risk and Compliance
-	Limits          *MerchantLimits    `gorm:"foreignKey:MerchantID"`
 	RiskScore       int                `gorm:"default:50"`
 	ComplianceLevel string             `gorm:"default:'medium_risk'"`
 	DisputeRate     float64            `gorm:"default:0"`
 	Chargeback      MerchantChargeback `gorm:"foreignKey:MerchantID"`
+
+	// Limits fields integrated here
+	DailyTransactionLimit   float64 `json:"daily_transaction_limit" gorm:"default:10000"`
+	MonthlyTransactionLimit float64 `json:"monthly_transaction_limit" gorm:"default:100000"`
+	MinTransactionAmount    float64 `json:"min_transaction_amount" gorm:"default:1"`
+	MaxTransactionAmount    float64 `json:"max_transaction_amount" gorm:"default:5000"`
 }
 
 type MerchantBankAccount struct {

@@ -4,22 +4,27 @@ import (
 	"orus/internal/models"
 	"orus/internal/repositories"
 	"orus/internal/services"
+	"orus/internal/services/qr"
 
 	"fmt"
 	"log"
 	"strings"
 	"time"
 
+	"orus/internal/utils/response"
+
 	"github.com/gofiber/fiber/v2"
 )
 
 type MerchantHandler struct {
 	merchantService *services.MerchantService
+	qrService       qr.Service
 }
 
-func NewMerchantHandler() *MerchantHandler {
+func NewMerchantHandler(merchantSvc *services.MerchantService, qrSvc qr.Service) *MerchantHandler {
 	return &MerchantHandler{
-		merchantService: services.NewMerchantService(),
+		merchantService: merchantSvc,
+		qrService:       qrSvc,
 	}
 }
 
@@ -33,42 +38,22 @@ func (h *MerchantHandler) CreateMerchant(c *fiber.Ctx) error {
 		})
 	}
 
+	// Set the UserID for the merchant
 	merchant.UserID = userID
-	merchant.Status = "pending"
-	merchant.APIKey = services.GenerateAPIKey() // Generate unique API key
-	merchant.VerificationStatus = "pending"
 
-	// Create the merchant profile
-	if err := repositories.CreateMerchant(&merchant); err != nil {
-		log.Printf("Failed to create merchant: %v", err)
-		if strings.Contains(err.Error(), "duplicate key") {
-			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
-				"error": "Merchant profile already exists for this user",
-			})
-		}
+	// Initialize limits directly in the Merchant struct
+	merchant.DailyTransactionLimit = 10000.0
+	merchant.MonthlyTransactionLimit = 100000.0
+	merchant.MinTransactionAmount = 1.0
+	merchant.MaxTransactionAmount = 5000.0
+
+	if err := h.merchantService.CreateMerchant(&merchant); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Failed to create merchant profile",
+			"error": err.Error(),
 		})
 	}
 
-	// Create default merchant limits
-	limits := models.MerchantLimits{
-		MerchantID:              merchant.ID,
-		DailyTransactionLimit:   10000.0,  // Default daily limit
-		MonthlyTransactionLimit: 100000.0, // Default monthly limit
-		MinTransactionAmount:    1.0,      // Minimum transaction amount
-		MaxTransactionAmount:    1000.0,   // Maximum transaction amount
-	}
-
-	if err := repositories.DB.Create(&limits).Error; err != nil {
-		log.Printf("Failed to create merchant limits: %v", err)
-		// Don't fail the request, just log the error
-	}
-
-	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-		"message":  "Merchant profile created successfully",
-		"merchant": merchant,
-	})
+	return response.Success(c, "Merchant created successfully", merchant)
 }
 
 func (h *MerchantHandler) ProcessTransaction(c *fiber.Ctx) error {
@@ -230,186 +215,137 @@ func (h *MerchantHandler) SetWebhookURL(c *fiber.Ctx) error {
 	})
 }
 
-func (h *MerchantHandler) GenerateQRCode(c *fiber.Ctx) error {
-	claims := c.Locals("claims").(*models.UserClaims)
+func (h *MerchantHandler) RegisterMerchant(c *fiber.Ctx) error {
+	userID := c.Locals("userID").(uint)
 
-	var input struct {
-		Amount *float64 `json:"amount"`
-		Type   string   `json:"type"` // "static" or "dynamic"
-	}
-
-	if err := c.BodyParser(&input); err != nil {
+	var merchant models.Merchant
+	if err := c.BodyParser(&merchant); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": "Invalid request format",
 		})
 	}
 
-	qrCode, err := services.NewQRService().GenerateQRCode(claims.UserID, "merchant", input.Type, input.Amount)
+	merchant.UserID = userID
+	merchant.Status = "pending"
+	merchant.APIKey = services.GenerateAPIKey() // Generate unique API key
+	merchant.VerificationStatus = "pending"
+
+	// Create the merchant profile
+	if err := repositories.CreateMerchant(&merchant); err != nil {
+		log.Printf("Failed to create merchant: %v", err)
+		if strings.Contains(err.Error(), "duplicate key") {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+				"error": "Merchant profile already exists for this user",
+			})
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Failed to create merchant profile",
+		})
+	}
+
+	// Get both QR codes
+	receiveQR, err := h.qrService.GetUserReceiveQR(c.Context(), merchant.ID)
+	if err != nil {
+		log.Printf("Failed to generate receive QR: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": fmt.Sprintf("Failed to generate receive QR: %v", err),
+		})
+	}
+
+	paymentCodeQR, err := h.qrService.GetUserPaymentCodeQR(c.Context(), merchant.ID)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": err.Error(),
+			"error": "Failed to generate payment code QR",
 		})
 	}
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-		"qr_code": qrCode,
+		"message":         "Merchant registered successfully",
+		"merchant":        merchant,
+		"receive_qr":      receiveQR,
+		"payment_code_qr": paymentCodeQR,
 	})
 }
 
 func (h *MerchantHandler) ScanUserPaymentCode(c *fiber.Ctx) error {
 	var input struct {
-		PaymentCode string  `json:"payment_code" validate:"required"`
-		Amount      float64 `json:"amount" validate:"required,gt=0"`
-		Description string  `json:"description"`
+		Code        string  `json:"code"`        // The user's payment code to scan
+		Amount      float64 `json:"amount"`      // Amount to charge
+		Description string  `json:"description"` // Optional payment description
 	}
 
 	if err := c.BodyParser(&input); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Invalid request format",
-		})
+		return response.Error(c, fiber.StatusBadRequest, "Invalid request body")
 	}
 
-	// Get merchant ID and validate role
-	claims := c.Locals("claims").(*models.UserClaims)
-	merchantID := claims.UserID
-	if claims.Role != "merchant" {
-		return c.Status(403).JSON(fiber.Map{"error": "Only merchants can scan payment codes"})
-	}
-
-	// Validate payment code
-	qrCode, err := services.NewQRService().ValidatePaymentCode(input.PaymentCode)
-	if err != nil {
-		switch err {
-		case services.ErrQRExpired:
-			return c.Status(400).JSON(fiber.Map{"error": "Payment code has expired"})
-		case services.ErrQRInactive:
-			return c.Status(400).JSON(fiber.Map{"error": "Payment code is inactive"})
-		default:
-			return c.Status(400).JSON(fiber.Map{"error": "Invalid payment code"})
-		}
-	}
-
-	// Ensure QR belongs to a user
-	if qrCode.UserType != "user" {
-		return c.Status(400).JSON(fiber.Map{"error": "Payment code must belong to a user"})
-	}
-
-	// Create and process transaction
-	tx := &models.Transaction{
-		TransactionID: fmt.Sprintf("TX-%d-%d", time.Now().Unix(), merchantID),
-		Type:          models.TransactionTypeMerchantScan,
-		SenderID:      qrCode.UserID, // Customer
-		ReceiverID:    merchantID,    // Merchant
-		Amount:        input.Amount,
-		Description:   input.Description,
-		PaymentType:   "QR_SCAN",
-		Status:        "pending",
-	}
-
-	processedTx, err := h.merchantService.ProcessTransaction(tx)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": fmt.Sprintf("Payment failed: %v", err),
-		})
-	}
-
-	return c.Status(fiber.StatusOK).JSON(fiber.Map{
-		"message":     "Payment processed successfully",
-		"transaction": processedTx,
-	})
-}
-
-func (h *MerchantHandler) GetMerchantQR(c *fiber.Ctx) error {
 	claims := c.Locals("claims").(*models.UserClaims)
 
-	// Get merchant's static QR code
-	qrCode, err := repositories.GetMerchantStaticQR(claims.UserID)
+	// Process the QR payment
+	tx, err := h.qrService.ProcessQRPayment(
+		c.Context(),
+		input.Code,
+		input.Amount,
+		claims.UserID, // merchant ID as the payer
+		input.Description,
+		nil, // metadata
+	)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Failed to get merchant QR code",
-		})
+		return response.Error(c, fiber.StatusBadRequest, err.Error())
 	}
 
-	return c.JSON(fiber.Map{
-		"qr_code": qrCode,
-	})
+	return response.Success(c, "Payment processed successfully", tx)
 }
 
-func (h *MerchantHandler) GenerateDynamicQR(c *fiber.Ctx) error {
-	claims := c.Locals("claims").(*models.UserClaims)
-
-	var input struct {
-		Amount float64 `json:"amount" validate:"required"`
-	}
-
-	if err := c.BodyParser(&input); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Invalid request format",
-		})
-	}
-
-	qrCode, err := services.NewQRService().GenerateDynamicQRCode(claims.UserID, "merchant", input.Amount)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": err.Error(),
-		})
-	}
-
-	return c.JSON(fiber.Map{"qr_code": qrCode})
-}
-
-func MerchantScanQR(c *fiber.Ctx) error {
+func (h *MerchantHandler) MerchantScanQR(c *fiber.Ctx) error {
 	claims := c.Locals("claims").(*models.UserClaims)
 	if claims == nil || claims.Role != "merchant" {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-			"error": "Unauthorized - Merchant access required",
-		})
+		return response.Unauthorized(c)
 	}
 
 	var input struct {
-		QRCode  string  `json:"qr_code" validate:"required"`
-		Amount  float64 `json:"amount" validate:"required,gt=0"`
-		Purpose string  `json:"purpose"`
+		QRCode      string                 `json:"qr_code" validate:"required"`
+		Amount      float64                `json:"amount" validate:"required,gt=0"`
+		Description string                 `json:"description"`
+		Metadata    map[string]interface{} `json:"metadata"`
 	}
 
 	if err := c.BodyParser(&input); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Invalid request format",
-		})
+		return response.BadRequest(c, "Invalid request format")
 	}
 
-	// Log the scan attempt
-	log.Printf("Merchant %d scanning QR code: %s for amount: %f", claims.UserID, input.QRCode, input.Amount)
-
-	merchantService := services.NewMerchantService()
-	tx := &models.Transaction{
-		Type:        models.TransactionTypeMerchantScan,
-		Amount:      input.Amount,
-		ReceiverID:  claims.UserID, // Merchant receives
-		Description: input.Purpose,
-	}
-
-	// Get customer's QR code
-	qr, err := repositories.GetQRCodeByCode(input.QRCode)
+	tx, err := h.qrService.ProcessQRPayment(
+		c.Context(),
+		input.QRCode,
+		input.Amount,
+		claims.UserID,
+		input.Description,
+		input.Metadata,
+	)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Invalid QR code",
-		})
+		return response.Error(c, fiber.StatusBadRequest, err.Error())
 	}
 
-	// Set sender (customer) ID from QR code
-	tx.SenderID = qr.UserID
+	return response.Success(c, "Payment processed successfully", tx)
+}
 
-	// Process transaction
-	result, err := merchantService.ProcessTransaction(tx)
+func (h *MerchantHandler) GetReceiveQR(c *fiber.Ctx) error {
+	claims := c.Locals("claims").(*models.UserClaims)
+
+	qr, err := h.qrService.GetUserReceiveQR(c.Context(), claims.UserID)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": err.Error(),
-		})
+		return response.Error(c, fiber.StatusInternalServerError, err.Error())
 	}
 
-	return c.JSON(fiber.Map{
-		"message":     "Payment processed successfully",
-		"transaction": result,
-	})
+	return response.Success(c, "Your QR code for receiving payments", qr)
+}
+
+func (h *MerchantHandler) GetPaymentCodeQR(c *fiber.Ctx) error {
+	claims := c.Locals("claims").(*models.UserClaims)
+
+	qr, err := h.qrService.GetUserPaymentCodeQR(c.Context(), claims.UserID)
+	if err != nil {
+		return response.Error(c, fiber.StatusInternalServerError, err.Error())
+	}
+
+	return response.Success(c, "Your QR code for payments", qr)
 }

@@ -73,7 +73,7 @@ func ProcessTransaction(senderID uint, receiverID uint, amount float64, qrCodeID
 			ReceiverID: receiverID,
 			Amount:     amount,
 			Status:     "pending",
-			QRCodeID:   qrCodeID,
+			QRCodeID:   &qrCodeID,
 			Type:       "TRANSFER",
 		}
 

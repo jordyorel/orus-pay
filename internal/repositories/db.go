@@ -5,10 +5,12 @@ import (
 	"log"
 	"orus/internal/config"
 	"orus/internal/models"
+	"os"
 	"time"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 var (
@@ -19,25 +21,24 @@ func InitDB() error {
 	initPostgres()
 	InitRedis()
 
-	// Auto-migrate the schema
+	// Auto-migrate the updated schema
 	err := DB.AutoMigrate(
 		&models.User{},
 		&models.Wallet{},
-		&models.Merchant{},
-		&models.MerchantLimits{},
-		&models.Transaction{},
+		&models.Merchant{},    // Now includes limits
+		&models.Transaction{}, // Consolidated transaction model
 		&models.CreateCreditCard{},
 		&models.KYCVerification{},
-		&models.MerchantBankAccount{},
-		&models.Enterprise{},
-		&models.EnterpriseLocation{},
-		&models.EnterpriseAPIKey{},
+		&models.Enterprise{}, // Consolidated enterprise model
 		&models.QRCode{},
-		&models.QRTransaction{},
-		&models.CreditCard{},
 	)
 
-	return err
+	if err != nil {
+		return err
+	}
+
+	log.Println("✅ Migrations applied successfully!")
+	return nil
 }
 
 func initPostgres() {
@@ -94,6 +95,20 @@ func initPostgres() {
 	db.Exec("GRANT ALL ON SCHEMA public TO postgres;")
 	db.Exec("GRANT ALL ON SCHEMA public TO public;")
 	db.Exec("SET search_path TO public;")
+
+	// Configure GORM logger to ignore "record not found" errors
+	db.Logger = db.Logger.LogMode(logger.Silent) // Or use a custom logger configuration:
+
+	newLogger := logger.New(
+		log.New(os.Stdout, "\r\n", log.LstdFlags),
+		logger.Config{
+			SlowThreshold:             time.Second,
+			LogLevel:                  logger.Warn, // Only log warnings and errors
+			IgnoreRecordNotFoundError: true,        // Ignore "record not found"
+			Colorful:                  true,
+		},
+	)
+	db.Logger = newLogger
 
 	log.Println("✅ PostgreSQL connected & migrations applied successfully!")
 }

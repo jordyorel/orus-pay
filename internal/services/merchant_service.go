@@ -50,9 +50,13 @@ func (s *MerchantService) CreateMerchant(merchant *models.Merchant) error {
 	return repositories.CreateMerchant(merchant)
 }
 
-func (s *MerchantService) UpdateLimits(merchantID uint, limits models.MerchantLimits) error {
-	return repositories.DB.Model(&models.Merchant{}).Where("id = ?", merchantID).
-		Update("limits", limits).Error
+func (s *MerchantService) UpdateLimits(merchantID uint, dailyLimit, monthlyLimit, minAmount, maxAmount float64) error {
+	return repositories.DB.Model(&models.Merchant{}).Where("id = ?", merchantID).Updates(models.Merchant{
+		DailyTransactionLimit:   dailyLimit,
+		MonthlyTransactionLimit: monthlyLimit,
+		MinTransactionAmount:    minAmount,
+		MaxTransactionAmount:    maxAmount,
+	}).Error
 }
 
 func (s *MerchantService) ProcessTransaction(tx *models.Transaction) (*models.Transaction, error) {
@@ -74,7 +78,7 @@ func (s *MerchantService) ProcessTransaction(tx *models.Transaction) (*models.Tr
 		// Get customer's payment QR
 		qr, err := repositories.GetUserPaymentQR(tx.SenderID)
 		if err == nil {
-			tx.QRCodeID = qr.Code
+			tx.QRCodeID = &qr.Code
 			tx.QRType = qr.Type
 			tx.QROwnerID = qr.UserID
 			tx.QROwnerType = "user"

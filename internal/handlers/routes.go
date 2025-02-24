@@ -1,119 +1,65 @@
-// package handlers
-
-// import (
-// 	"orus/internal/middleware"
-// 	"orus/internal/models"
-
-// 	"github.com/gofiber/fiber/v2"
-// )
-
-// func SetupRoutes(app *fiber.App) {
-// 	// health check at the root
-// 	app.Get("/health", HealthCheck)
-
-// 	// Public routes
-// 	app.Get("/", func(c *fiber.Ctx) error { return c.SendString("Welcome to OrusPay API!") })
-// 	api := app.Group("/api")
-// 	api.Post("/register", RegisterUser)
-// 	api.Post("/login", LoginUser)
-// 	api.Post("/refresh", RefreshToken)
-
-// 	// User routes with authentication
-// 	authenticated := api.Group("/", middleware.AuthMiddleware)
-
-// 	// Wallet routes
-// 	wallet := authenticated.Group("/wallet")
-// 	wallet.Get("/", middleware.HasPermission(models.PermissionWalletRead), GetWallet)
-// 	wallet.Post("/topup", middleware.HasPermission(models.PermissionWalletWrite), TopUpWallet)
-// 	wallet.Post("/withdraw", middleware.HasPermission(models.PermissionWalletWrite), WithdrawToCard)
-
-// 	// Also add the direct wallet endpoint
-// 	authenticated.Get("/wallet", middleware.HasPermission(models.PermissionWalletRead), GetWallet)
-
-// 	// Transaction routes
-// 	authenticated.Get("/transactions", GetUserTransactions)
-// 	authenticated.Post("/transaction", ProcessTransaction)
-
-// 	// Other user routes
-// 	authenticated.Post("/credit-card", LinkCreditCard)
-// 	authenticated.Post("/change-password", ChangePassword)
-// 	authenticated.Post("/refresh", RefreshToken)
-// 	authenticated.Post("/logout", LogoutUser)
-
-// 	// Initialize handlers
-// 	paymentHandler := NewPaymentHandler()
-// 	merchantHandler := NewMerchantHandler()
-// 	enterpriseHandler := NewEnterpriseHandler()
-// 	userHandler := NewUserHandler()
-
-// 	// Merchant routes
-// 	merchant := authenticated.Group("/merchant")
-// 	merchant.Post("/", merchantHandler.CreateMerchant)
-
-// 	// Use existing paymentHandler
-// 	merchant.Post("/qr", middleware.HasPermission(models.PermissionMerchantTransaction), paymentHandler.GenerateQRCode)
-// 	merchant.Post("/qr/dynamic", middleware.HasPermission(models.PermissionMerchantTransaction), paymentHandler.GenerateQRCode)
-// 	merchant.Post("/qr/static", middleware.HasPermission(models.PermissionMerchantTransaction), paymentHandler.GenerateQRCode)
-
-// 	// Other merchant routes that need merchant permissions
-// 	merchant.Get("/profile", middleware.HasPermission(models.PermissionMerchantRead), merchantHandler.GetMerchantProfile)
-// 	merchant.Put("/profile", middleware.HasPermission(models.PermissionMerchantWrite), merchantHandler.UpdateMerchantProfile)
-
-// 	// Merchant transactions
-// 	merchant.Post("/transaction", middleware.HasPermission(models.PermissionMerchantTransaction), merchantHandler.ProcessTransaction)
-// 	merchant.Get("/:merchantId/transactions", middleware.HasPermission(models.PermissionMerchantRead), merchantHandler.GetMerchantTransactions)
-
-// 	// Merchant settings
-// 	merchant.Post("/:merchantId/apikey", middleware.HasPermission(models.PermissionMerchantWrite), merchantHandler.GenerateAPIKey)
-// 	merchant.Post("/:merchantId/webhook", middleware.HasPermission(models.PermissionMerchantWrite), merchantHandler.SetWebhookURL)
-
-// 	// Move these into the authenticated group
-// 	authenticated.Post("/qr/dynamic", paymentHandler.GenerateQRCode)
-// 	authenticated.Post("/payment/qr", paymentHandler.ProcessQRPayment)
-
-// 	// User routes
-// 	authenticated.Get("/payment-code", userHandler.GeneratePaymentCode) // User gets their payment QR
-// 	authenticated.Get("/receive-code", userHandler.GetReceiveCode)      // For receiving payments
-
-// 	// Enterprise routes (requires enterprise role)
-// 	enterprise := authenticated.Group("/enterprise")
-// 	enterprise.Post("/", enterpriseHandler.CreateEnterprise)
-// 	enterprise.Post("/:enterpriseId/apikey", enterpriseHandler.GenerateAPIKey)
-
-// 	// Admin routes (require AdminAuthMiddleware)
-// 	admin := api.Group("/admin", middleware.AdminAuthMiddleware)
-// 	admin.Get("/transactions", middleware.HasPermission(models.PermissionReadAdmin), GetAllTransactions)
-// 	admin.Get("/users", middleware.HasPermission(models.PermissionReadAdmin), GetUsersPaginated)
-// 	admin.Delete("/users/:id", middleware.HasPermission(models.PermissionWriteAdmin), DeleteUser)
-// 	admin.Get("/wallets", middleware.HasPermission(models.PermissionWriteAdmin), GetAllWallets)          // Admin view all wallets
-// 	admin.Get("/credit-cards", middleware.HasPermission(models.PermissionWriteAdmin), GetAllCreditCards) // Admin view all credit cards
-
-// 	// Merchant routes
-// 	merchant.Post("/scan", merchantHandler.ScanUserPaymentCode) // Merchant scans user's payment QR
-
-// 	// Merchant QR routes
-// 	merchant.Get("/qr", merchantHandler.GetMerchantQR)              // Get static QR
-// 	merchant.Post("/qr/dynamic", merchantHandler.GenerateDynamicQR) // Only for dynamic QRs
-// }
-
 package handlers
 
 import (
 	"orus/internal/middleware"
 	"orus/internal/models"
+	"orus/internal/repositories"
+	"orus/internal/repositories/cache"
+	"orus/internal/services"
+	"orus/internal/services/qr"
+	"orus/internal/services/transaction"
+	"orus/internal/services/wallet"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/redis/go-redis/v9"
 )
 
 func SetupRoutes(app *fiber.App) {
-	// Initialize handlers first
-	paymentHandler := NewPaymentHandler()
-	merchantHandler := NewMerchantHandler()
+	// Initialize cache
+	redisClient := redis.NewClient(&redis.Options{
+		Addr: "localhost:6379",
+	})
+	noCtxCache, ctxCache := cache.NewCaches(redisClient)
+
+	// Initialize services in correct order
+	walletService := wallet.NewService(
+		repositories.DB,
+		noCtxCache, // Uses no-context interface
+		wallet.WalletConfig{},
+		&wallet.NoopMetricsCollector{},
+	)
+
+	transactionService := transaction.NewService(
+		repositories.DB,
+		walletService,
+		walletService,
+		noCtxCache, // Uses no-context interface
+	)
+
+	qrService := qr.NewService(
+		repositories.DB,
+		ctxCache, // Uses context interface
+		transactionService,
+		walletService,
+	)
+
+	// Initialize handlers with services
+	paymentHandler := NewPaymentHandler(qrService, transactionService)
+	merchantHandler := NewMerchantHandler(services.NewMerchantService(), qrService)
 	enterpriseHandler := NewEnterpriseHandler()
-	userHandler := NewUserHandler()
+	userHandler := NewUserHandler(
+		qrService,
+		walletService,
+	)
 
 	// Public routes
-	setupPublicRoutes(app)
+	app.Get("/health", HealthCheck)
+	app.Get("/", func(c *fiber.Ctx) error { return c.SendString("Welcome to OrusPay API!") })
+
+	api := app.Group("/api")
+	api.Post("/register", userHandler.RegisterUser)
+	api.Post("/login", LoginUser)
+	api.Post("/refresh", RefreshToken)
 
 	// Authenticated routes
 	authenticated := app.Group("/api", middleware.AuthMiddleware)
@@ -123,16 +69,6 @@ func SetupRoutes(app *fiber.App) {
 	setupMerchantRoutes(authenticated, merchantHandler)
 	setupEnterpriseRoutes(authenticated, enterpriseHandler)
 	setupAdminRoutes(app)
-}
-
-func setupPublicRoutes(app *fiber.App) {
-	app.Get("/health", HealthCheck)
-	app.Get("/", func(c *fiber.Ctx) error { return c.SendString("Welcome to OrusPay API!") })
-
-	api := app.Group("/api")
-	api.Post("/register", RegisterUser)
-	api.Post("/login", LoginUser)
-	api.Post("/refresh", RefreshToken)
 }
 
 func setupUserRoutes(router fiber.Router, userHandler *UserHandler, paymentHandler *PaymentHandler) {
@@ -154,11 +90,11 @@ func setupUserRoutes(router fiber.Router, userHandler *UserHandler, paymentHandl
 	payments := router.Group("/payment")
 	payments.Post("/scan", paymentHandler.ProcessQRPayment) //✅
 	payments.Post("/send", paymentHandler.SendMoney)        //✅
-	payments.Post("/qr", paymentHandler.GeneratePaymentQR)  //✅
 
 	// QR code routes
 	qr := router.Group("/qr")
-	qr.Get("/receive", userHandler.GetReceiveQR) //✅
+	qr.Get("/receive", userHandler.GetReceiveQR)     // For receiving money
+	qr.Get("/payment", userHandler.GetPaymentCodeQR) // For payments at merchants
 }
 
 func setupMerchantRoutes(router fiber.Router, h *MerchantHandler) {
@@ -170,13 +106,13 @@ func setupMerchantRoutes(router fiber.Router, h *MerchantHandler) {
 	merchant.Put("/profile", middleware.HasPermission(models.PermissionMerchantWrite), h.UpdateMerchantProfile) //✅
 
 	// QR Management
-	merchant.Get("/qr/static", h.GetMerchantQR)
-	merchant.Post("/qr/dynamic", h.GenerateDynamicQR)
+	merchant.Get("/qr/receive", h.GetReceiveQR)     // For receiving money
+	merchant.Get("/qr/payment", h.GetPaymentCodeQR) // For payments
+	merchant.Post("/scan", h.ScanUserPaymentCode)   // For scanning user QRs
 
 	// Transaction Management
 	merchant.Post("/transaction", middleware.HasPermission(models.PermissionMerchantTransaction), h.ProcessTransaction)
 	merchant.Get("/:merchantId/transactions", h.GetMerchantTransactions)
-	merchant.Post("/scan", middleware.HasPermission(models.PermissionMerchantTransaction), h.ScanUserPaymentCode)
 
 	// Integration Settings
 	merchant.Post("/:merchantId/apikey", middleware.HasPermission(models.PermissionMerchantWrite), h.GenerateAPIKey)

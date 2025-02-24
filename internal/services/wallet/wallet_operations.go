@@ -75,7 +75,8 @@ func (s *WalletService) ProcessOperation(ctx context.Context, op WalletOperation
 		txn := &models.Transaction{
 			TransactionID: op.Reference,
 			Type:          string(op.Operation),
-			UserID:        op.UserID,
+			SenderID:      op.UserID,
+			ReceiverID:    op.UserID,
 			Amount:        op.Amount,
 			Status:        "completed",
 			Reference:     op.Reference,

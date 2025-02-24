@@ -30,15 +30,22 @@ const (
 
 type ProcessorConfig struct {
 	DB            *gorm.DB
-	WalletService *wallet.WalletService
+	WalletService wallet.Service
 }
 
 type Processor struct {
 	db            *gorm.DB
-	walletService *wallet.WalletService
+	walletService wallet.Service
 }
 
 func NewProcessor(config ProcessorConfig) *Processor {
+	if config.DB == nil {
+		panic("db is required")
+	}
+	if config.WalletService == nil {
+		panic("wallet service is required")
+	}
+
 	return &Processor{
 		db:            config.DB,
 		walletService: config.WalletService,
@@ -74,32 +81,26 @@ func (p *Processor) Process(ctx context.Context, req TransactionRequest) (*model
 	err := p.db.Transaction(func(dtx *gorm.DB) error {
 		// Debit sender
 		if req.SenderID != 0 {
-			debitOp := wallet.WalletOperation{
-				UserID:    req.SenderID,
-				Operation: wallet.OperationDebit,
-				Amount:    req.Amount,
-				Reference: tx.TransactionID,
-			}
-			if err := p.walletService.ProcessOperation(ctx, debitOp); err != nil {
-				return err
+			if err := p.walletService.Debit(ctx, req.SenderID, req.Amount); err != nil {
+				return fmt.Errorf("failed to debit sender: %w", err)
 			}
 		}
 
 		// Credit receiver
 		if req.ReceiverID != 0 {
-			creditOp := wallet.WalletOperation{
-				UserID:    req.ReceiverID,
-				Operation: wallet.OperationCredit,
-				Amount:    req.Amount,
-				Reference: tx.TransactionID,
-			}
-			if err := p.walletService.ProcessOperation(ctx, creditOp); err != nil {
-				return err
+			if err := p.walletService.Credit(ctx, req.ReceiverID, req.Amount); err != nil {
+				// Rollback sender debit if credit fails
+				if req.SenderID != 0 {
+					if rbErr := p.walletService.Credit(ctx, req.SenderID, req.Amount); rbErr != nil {
+						return fmt.Errorf("critical error: credit failed and rollback failed: %v, %v", err, rbErr)
+					}
+				}
+				return fmt.Errorf("failed to credit receiver: %w", err)
 			}
 		}
 
 		tx.Status = "completed"
-		return dtx.Create(tx).Error
+		return dtx.Save(tx).Error
 	})
 
 	if err != nil {

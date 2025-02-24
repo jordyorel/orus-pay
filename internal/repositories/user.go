@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"orus/internal/models"
-	"orus/internal/utils"
 	"strconv"
 	"time"
 
@@ -110,58 +109,24 @@ func GetUserByPhone(phone string) (*models.User, error) {
 
 func CreateUser(user *models.User) (*models.User, *models.QRCode, error) {
 	tx := DB.Begin()
-	if tx.Error != nil {
-		return nil, nil, tx.Error
-	}
-	defer tx.Rollback()
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+		}
+	}()
 
-	// Create user
 	if err := tx.Create(user).Error; err != nil {
+		tx.Rollback()
 		return nil, nil, err
 	}
 
-	// Create wallet with explicit 0 balance
-	wallet := &models.Wallet{
-		UserID:   user.ID,
-		Balance:  0.0, // Explicitly set to 0
-		Currency: "USD",
-	}
-	if err := tx.Create(wallet).Error; err != nil {
-		return nil, nil, err
-	}
-
-	// Create static QR code for receiving payments
-	qrCode := &models.QRCode{
-		Code:     utils.MustGenerateSecureCode(),
-		UserID:   user.ID,
-		UserType: "user",
-		Type:     models.QRTypeStatic,
-		Status:   "active",
-		MaxUses:  -1,
-	}
-
-	// Set limits based on user role
-	if user.Role == "merchant" {
-		dailyLimit := float64(10000)
-		monthlyLimit := float64(100000)
-		qrCode.DailyLimit = &dailyLimit
-		qrCode.MonthlyLimit = &monthlyLimit
-	} else {
-		dailyLimit := float64(1000)
-		monthlyLimit := float64(5000)
-		qrCode.DailyLimit = &dailyLimit
-		qrCode.MonthlyLimit = &monthlyLimit
-	}
-
-	if err := tx.Create(qrCode).Error; err != nil {
-		return nil, nil, err
-	}
+	// Remove any QR code creation here - we handle that in the service now
 
 	if err := tx.Commit().Error; err != nil {
 		return nil, nil, err
 	}
 
-	return user, qrCode, nil
+	return user, nil, nil
 }
 
 // internal/repositories/user.go

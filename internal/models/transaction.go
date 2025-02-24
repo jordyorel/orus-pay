@@ -15,40 +15,31 @@ const (
 	TransactionTypeMerchantScan   = "MERCHANT_SCAN"
 )
 
+// Consolidated Transaction model
 type Transaction struct {
 	gorm.Model
-	TransactionID string `gorm:"unique;not null"`
-	UserID        uint   `gorm:"index"`    // For direct wallet operations
-	Type          string `gorm:"not null"` // QR_PAYMENT, MERCHANT_SCAN, etc.
-	SenderID      uint   `gorm:"index"`
-	ReceiverID    uint   `gorm:"index"`
-	Amount        float64
-	Fee           float64 `gorm:"default:0"`
-	Currency      string  `gorm:"default:'USD'"`
-	Status        string  `gorm:"default:'pending'"`
-	Reference     string  // For tracking related transactions
-	Description   string
-
-	// QR specific fields
-	QRCodeID    string `gorm:"index"`
-	QRType      string // static, dynamic, payment
-	QROwnerID   uint   `gorm:"index"`
-	QROwnerType string // user, merchant
-
-	// Payment details
-	PaymentMethod string
-	PaymentType   string // DIRECT, QR_SCAN, CARD
-	CardID        *uint  `gorm:"index"` // For card-based transactions
-
-	// Merchant specific
-	MerchantID       *uint `gorm:"index"`
+	TransactionID    string  `json:"transaction_id"`
+	Type             string  `json:"type"` // "qr", "direct", "card"
+	SenderID         uint    `json:"sender_id"`
+	ReceiverID       uint    `json:"receiver_id"`
+	Amount           float64 `json:"amount"`
+	Fee              float64
+	Currency         string `json:"currency"`
+	Status           string `json:"status"`
+	Reference        string
+	Description      string  `json:"description"`
+	QRCodeID         *string `json:"qr_code_id,omitempty"`
+	QRType           string  `json:"qr_type,omitempty"`
+	QROwnerID        uint    `json:"qr_owner_id,omitempty"`
+	QROwnerType      string  `json:"qr_owner_type,omitempty"`
+	PaymentMethod    string  `json:"payment_method" gorm:"default:'qr'"`
+	PaymentType      string  `json:"payment_type" gorm:"default:'direct'"`
+	CardID           *uint
+	MerchantID       *uint
 	MerchantName     string
 	MerchantCategory string
-
-	// Additional metadata
-	Location   *Location              `gorm:"type:jsonb"`
-	DeviceInfo *DeviceInfo            `gorm:"type:jsonb"`
-	Metadata   map[string]interface{} `gorm:"type:jsonb"`
+	Metadata         JSON `json:"metadata" gorm:"type:jsonb"`
+	History          JSON `json:"history" gorm:"type:jsonb"`
 }
 
 type Location struct {

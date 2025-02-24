@@ -4,29 +4,20 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
-type Response struct {
-	Success bool        `json:"success"`
-	Message string      `json:"message,omitempty"`
-	Data    interface{} `json:"data,omitempty"`
-	Error   string      `json:"error,omitempty"`
-}
-
 func Success(c *fiber.Ctx, message string, data interface{}) error {
-	return c.JSON(Response{
-		Success: true,
-		Message: message,
-		Data:    data,
+	return c.JSON(fiber.Map{
+		"message": message,
+		"data":    data,
 	})
 }
 
-func Error(c *fiber.Ctx, statusCode int, message string) error {
-	return c.Status(statusCode).JSON(Response{
-		Success: false,
-		Error:   message,
+func Error(c *fiber.Ctx, status int, message string) error {
+	return c.Status(status).JSON(fiber.Map{
+		"error": message,
 	})
 }
 
-func ValidationError(c *fiber.Ctx, message string) error {
+func BadRequest(c *fiber.Ctx, message string) error {
 	return Error(c, fiber.StatusBadRequest, message)
 }
 
@@ -35,9 +26,9 @@ func ServerError(c *fiber.Ctx, message string) error {
 }
 
 func Unauthorized(c *fiber.Ctx) error {
-	return Error(c, fiber.StatusUnauthorized, "Unauthorized access")
+	return Error(c, fiber.StatusUnauthorized, "Unauthorized")
 }
 
-func NotFound(c *fiber.Ctx, message string) error {
-	return Error(c, fiber.StatusNotFound, message)
+func ValidationError(c *fiber.Ctx, message string) error {
+	return Error(c, fiber.StatusBadRequest, message)
 }

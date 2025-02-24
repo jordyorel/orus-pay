@@ -3,11 +3,16 @@ package handlers
 import (
 	"orus/internal/models"
 	"orus/internal/repositories"
+	"orus/internal/utils/response"
 	"regexp"
 
 	"orus/internal/utils"
 
-	"orus/internal/services"
+	"orus/internal/services/qr"
+	"orus/internal/services/wallet"
+
+	"fmt"
+	"log"
 
 	"github.com/gofiber/fiber/v2"
 	"golang.org/x/crypto/bcrypt"
@@ -18,16 +23,18 @@ var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]
 var phoneRegex = regexp.MustCompile(`^\+?[0-9]{7,15}$`) // Allows optional + and 7-15 digits
 
 type UserHandler struct {
-	qrService *services.QRService
+	qrService     qr.Service
+	walletService wallet.Service
 }
 
-func NewUserHandler() *UserHandler {
+func NewUserHandler(qrSvc qr.Service, walletSvc wallet.Service) *UserHandler {
 	return &UserHandler{
-		qrService: services.NewQRService(),
+		qrService:     qrSvc,
+		walletService: walletSvc,
 	}
 }
 
-func RegisterUser(c *fiber.Ctx) error {
+func (h *UserHandler) RegisterUser(c *fiber.Ctx) error {
 	var input struct {
 		Name     string `json:"name"`
 		Email    string `json:"email"`
@@ -94,60 +101,56 @@ func RegisterUser(c *fiber.Ctx) error {
 		}(),
 	}
 
-	createdUser, qrCode, err := repositories.CreateUser(user)
+	createdUser, _, err := repositories.CreateUser(user)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": err.Error(),
 		})
 	}
 
-	// For merchant role, return instructions
-	if input.Role == "merchant" {
-		createdUser.Password = ""
-		return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-			"user":      createdUser,
-			"message":   "Please complete your merchant profile by sending a POST request to /api/merchant with your business details",
-			"next_step": "/api/merchant",
-			"static_qr": qrCode,
+	// Get wallet
+	wallet, err := h.walletService.GetWallet(c.Context(), createdUser.ID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Failed to get wallet info",
 		})
 	}
 
+	// Get both QR codes
+	receiveQR, err := h.qrService.GetUserReceiveQR(c.Context(), createdUser.ID)
+	if err != nil {
+		log.Printf("Failed to generate receive QR: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": fmt.Sprintf("Failed to generate receive QR: %v", err),
+		})
+	}
+
+	paymentCodeQR, err := h.qrService.GetUserPaymentCodeQR(c.Context(), createdUser.ID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Failed to generate payment code QR",
+		})
+	}
+
+	// Update user with wallet info
+	createdUser.WalletID = &wallet.ID
+	createdUser.Wallet = wallet // Include the wallet object
 	createdUser.Password = ""
+
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-		"message":   "User registered successfully",
-		"user":      createdUser,
-		"static_qr": qrCode,
+		"message":         "User registered successfully",
+		"user":            createdUser,
+		"receive_qr":      receiveQR,
+		"payment_code_qr": paymentCodeQR,
 	})
 }
 
 func (h *UserHandler) GeneratePaymentCode(c *fiber.Ctx) error {
 	claims := c.Locals("claims").(*models.UserClaims)
-	qrCode, err := h.qrService.GeneratePaymentCode(claims.UserID)
+	qrCode, err := h.qrService.GeneratePaymentCode(c.Context(), claims.UserID)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": err.Error(),
-		})
-	}
-	return c.JSON(fiber.Map{"qr_code": qrCode})
-}
-
-func (h *UserHandler) GenerateReceiveCode(c *fiber.Ctx) error {
-	claims := c.Locals("claims").(*models.UserClaims)
-	qrCode, err := h.qrService.GenerateQRCode(claims.UserID, "user", "static", nil)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": err.Error(),
-		})
-	}
-	return c.JSON(fiber.Map{"qr_code": qrCode})
-}
-
-func (h *UserHandler) GetReceiveCode(c *fiber.Ctx) error {
-	claims := c.Locals("claims").(*models.UserClaims)
-	qrCode, err := repositories.GetUserStaticQR(claims.UserID)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Failed to get receive code",
 		})
 	}
 	return c.JSON(fiber.Map{"qr_code": qrCode})
@@ -156,13 +159,21 @@ func (h *UserHandler) GetReceiveCode(c *fiber.Ctx) error {
 func (h *UserHandler) GetReceiveQR(c *fiber.Ctx) error {
 	claims := c.Locals("claims").(*models.UserClaims)
 
-	qr, err := services.NewQRService().GeneratePaymentCode(claims.UserID)
+	qr, err := h.qrService.GetUserReceiveQR(c.Context(), claims.UserID)
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		return response.Error(c, fiber.StatusInternalServerError, err.Error())
 	}
 
-	return c.JSON(fiber.Map{
-		"qr_code": qr,
-		"message": "Use this QR code to receive payments",
-	})
+	return response.Success(c, "Your QR code for receiving payments", qr)
+}
+
+func (h *UserHandler) GetPaymentCodeQR(c *fiber.Ctx) error {
+	claims := c.Locals("claims").(*models.UserClaims)
+
+	qr, err := h.qrService.GetUserPaymentCodeQR(c.Context(), claims.UserID)
+	if err != nil {
+		return response.Error(c, fiber.StatusInternalServerError, err.Error())
+	}
+
+	return response.Success(c, "Your QR code for merchant payments", qr)
 }
