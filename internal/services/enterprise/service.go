@@ -1,4 +1,4 @@
-package services
+package enterprise
 
 import (
 	"encoding/json"

@@ -6,12 +6,22 @@ import (
 	"errors"
 )
 
-// JSON type for flexible storage
-type JSON map[string]interface{}
+// JSON custom type for handling JSON data
+type JSON struct {
+	data interface{}
+}
+
+// NewJSON creates a new JSON instance
+func NewJSON(data interface{}) JSON {
+	return JSON{data: data}
+}
 
 // Value implements the driver.Valuer interface
 func (j JSON) Value() (driver.Value, error) {
-	return json.Marshal(j)
+	if j.data == nil {
+		return nil, nil
+	}
+	return json.Marshal(j.data)
 }
 
 // Scan implements the sql.Scanner interface
@@ -20,15 +30,18 @@ func (j *JSON) Scan(value interface{}) error {
 	if !ok {
 		return nil
 	}
-	return json.Unmarshal(bytes, &j)
+	return json.Unmarshal(bytes, &j.data)
 }
 
 // MarshalJSON returns the JSON encoding
 func (j JSON) MarshalJSON() ([]byte, error) {
-	if j == nil {
+	if b, ok := j.data.([]byte); ok {
+		return b, nil
+	}
+	if j.data == nil {
 		return []byte("null"), nil
 	}
-	return json.Marshal(j)
+	return json.Marshal(j.data)
 }
 
 // UnmarshalJSON sets the JSON encoding
@@ -36,5 +49,5 @@ func (j *JSON) UnmarshalJSON(data []byte) error {
 	if j == nil {
 		return errors.New("nil pointer")
 	}
-	return json.Unmarshal(data, &j)
+	return json.Unmarshal(data, &j.data)
 }

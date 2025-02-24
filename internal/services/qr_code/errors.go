@@ -1,4 +1,4 @@
-package qr
+package qr_code
 
 import "errors"
 

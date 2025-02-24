@@ -114,7 +114,7 @@ func (s *service) Credit(ctx context.Context, userID uint, amount float64) error
 		s.metrics.RecordOperationResult("credit", "success")
 
 		// Record the transaction
-		if err := s.recordTransaction(ctx, tx, userID, amount, "credit"); err != nil {
+		if err := s.recordTransaction(tx, userID, amount, "credit", fmt.Sprintf("%s transaction of %.2f", "credit", amount)); err != nil {
 			s.metrics.RecordError("credit", "record_transaction_failed")
 			return fmt.Errorf("failed to record transaction: %w", err)
 		}
@@ -387,27 +387,16 @@ func (s *service) GetTransactionHistory(ctx context.Context, walletID uint, limi
 	return history, nil
 }
 
-func (s *service) recordTransaction(ctx context.Context, tx *gorm.DB, walletID uint, amount float64, txType string) error {
-	history := TransactionHistory{
-		WalletID:    walletID,
-		Amount:      amount,
+func (s *service) recordTransaction(tx *gorm.DB, walletID uint, amount float64, txType string, description string) error {
+	transaction := &models.Transaction{
 		Type:        txType,
-		Description: fmt.Sprintf("%s transaction of %.2f", txType, amount),
-		CreatedAt:   time.Now(),
+		Amount:      amount,
+		Status:      "completed",
+		Description: description,
+		SenderID:    walletID,
+		ReceiverID:  walletID,
 	}
-
-	// Get current balance
-	var wallet models.Wallet
-	if err := tx.WithContext(ctx).Where("id = ?", walletID).First(&wallet).Error; err != nil {
-		return fmt.Errorf("failed to get wallet balance: %w", err)
-	}
-	history.Balance = wallet.Balance
-
-	if err := tx.Create(&history).Error; err != nil {
-		return fmt.Errorf("failed to record transaction: %w", err)
-	}
-
-	return nil
+	return tx.Create(transaction).Error
 }
 
 // Add new cache invalidation helper
@@ -474,10 +463,10 @@ func (s *service) processTransfer(ctx context.Context, tx *gorm.DB, transfer Tra
 	}
 
 	// Record the transfer
-	if err := s.recordTransaction(ctx, tx, transfer.FromWalletID, transfer.Amount, "debit"); err != nil {
+	if err := s.recordTransaction(tx, transfer.FromWalletID, transfer.Amount, "debit", fmt.Sprintf("%s transaction of %.2f", "debit", transfer.Amount)); err != nil {
 		return err
 	}
-	if err := s.recordTransaction(ctx, tx, transfer.ToWalletID, transfer.Amount, "credit"); err != nil {
+	if err := s.recordTransaction(tx, transfer.ToWalletID, transfer.Amount, "credit", fmt.Sprintf("%s transaction of %.2f", "credit", transfer.Amount)); err != nil {
 		return err
 	}
 

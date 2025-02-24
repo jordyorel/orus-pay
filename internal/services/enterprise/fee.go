@@ -1,4 +1,8 @@
-package services
+package enterprise
+
+import (
+	"orus/internal/models"
+)
 
 type FeeCalculator struct {
 	baseFee     float64
@@ -12,6 +16,6 @@ func NewFeeCalculator() *FeeCalculator {
 	}
 }
 
-func (fc *FeeCalculator) CalculateFee(amount float64) float64 {
+func (fc *FeeCalculator) CalculateTransactionFee(amount float64, userType models.UserType) float64 {
 	return fc.baseFee + (amount * fc.percentRate)
 }

@@ -1,4 +1,4 @@
-package qr
+package qr_code
 
 import (
 	"context"
@@ -20,14 +20,8 @@ type WalletService interface {
 
 // Service defines the interface for QR code operations
 type Service interface {
-	// Generation methods
-	GenerateQRCode(ctx context.Context, userID uint, userType string, qrType string, amount *float64) (*models.QRCode, error)
-	GeneratePaymentQR(ctx context.Context, userID uint, amount float64) (*models.QRCode, error)
-	GeneratePaymentCode(ctx context.Context, userID uint) (*models.QRCode, error)
-
 	// Processing methods
 	ProcessQRPayment(ctx context.Context, code string, amount float64, payerID uint, description string, metadata map[string]interface{}) (*models.Transaction, error)
-	ValidateQRCode(ctx context.Context, code string) (*models.QRCode, error)
 
 	// Static QR methods - only these two
 	GetUserReceiveQR(ctx context.Context, userID uint) (*models.QRCode, error)

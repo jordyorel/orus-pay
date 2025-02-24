@@ -2,66 +2,85 @@ package transaction
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math"
 	"orus/internal/models"
+	"orus/internal/repositories"
 	"time"
-
-	"orus/internal/services/wallet"
 
 	"gorm.io/gorm"
 )
 
-type service struct {
-	db        *gorm.DB
-	processor TransactionProcessor
-	wallet    WalletOperator
-	cache     wallet.CacheOperator
-	config    TransactionConfig
+var (
+	ErrHighRiskTransaction = errors.New("transaction risk too high")
+	highRiskThreshold      = 0.8
+)
+
+type Service interface {
+	Process(ctx context.Context, tx *models.Transaction) error
+	Rollback(ctx context.Context, tx *models.Transaction) error
+	ProcessP2PTransfer(ctx context.Context, req TransferRequest) (*models.Transaction, error)
+	ProcessTransaction(ctx context.Context, tx *models.Transaction) (*models.Transaction, error)
 }
 
-// NewService creates a new transaction service
-func NewService(db *gorm.DB, processor TransactionProcessor, wallet WalletOperator, cache wallet.CacheOperator) Service {
-	if db == nil {
-		panic("db is required")
-	}
-	if processor == nil {
-		panic("processor is required")
-	}
-	if wallet == nil {
-		panic("wallet is required")
-	}
-	if cache == nil {
-		panic("cache is required")
-	}
+type service struct {
+	db             *gorm.DB
+	walletService  WalletService
+	balanceService BalanceService
+	cache          repositories.CacheRepository
+	riskService    *RiskService
+}
 
+func NewService(
+	db *gorm.DB,
+	walletSvc WalletService,
+	balanceSvc BalanceService,
+	cache repositories.CacheRepository,
+) Service {
 	return &service{
-		db:        db,
-		processor: processor,
-		wallet:    wallet,
-		cache:     cache,
-		config: TransactionConfig{
-			MaxAmount:     DefaultMaxAmount,
-			MinAmount:     DefaultMinAmount,
-			RetryAttempts: DefaultMaxRetries,
-		},
+		db:             db,
+		walletService:  walletSvc,
+		balanceService: balanceSvc,
+		cache:          cache,
+		riskService:    NewRiskService(),
 	}
 }
 
 func (s *service) ProcessTransaction(ctx context.Context, tx *models.Transaction) (*models.Transaction, error) {
-	if err := s.ValidateTransaction(ctx, tx); err != nil {
-		return nil, fmt.Errorf("validation failed: %w", err)
+	// Round amount to 2 decimal places
+	tx.Amount = math.Round(tx.Amount*100) / 100
+
+	// Risk assessment
+	riskScore := s.riskService.AssessTransaction(tx)
+	if riskScore > highRiskThreshold {
+		return nil, ErrHighRiskTransaction
 	}
 
-	// Start transaction processing
-	if err := s.processor.Process(ctx, tx); err != nil {
-		return nil, fmt.Errorf("processing failed: %w", err)
+	// Process based on transaction type
+	switch tx.Type {
+	case models.TransactionTypeMerchantDirect, models.TransactionTypeQRPayment, "P2P_TRANSFER":
+		if err := s.db.Transaction(func(txn *gorm.DB) error {
+			if err := s.walletService.Debit(ctx, tx.SenderID, tx.Amount); err != nil {
+				return err
+			}
+			if err := s.walletService.Credit(ctx, tx.ReceiverID, tx.Amount); err != nil {
+				// Rollback debit if credit fails
+				_ = s.walletService.Credit(ctx, tx.SenderID, tx.Amount)
+				return err
+			}
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+		tx.Status = "completed"
+
+	default:
+		return nil, fmt.Errorf("unsupported transaction type: %s", tx.Type)
 	}
 
-	// Cache the result
-	cacheKey := fmt.Sprintf("%s%s", TransactionCachePrefix, tx.TransactionID)
-	if err := s.cache.Set(cacheKey, tx, time.Hour); err != nil {
-		// Log cache error but don't fail the transaction
-		fmt.Printf("Failed to cache transaction: %v\n", err)
+	if err := s.db.Create(tx).Error; err != nil {
+		return nil, fmt.Errorf("failed to record transaction: %w", err)
 	}
 
 	return tx, nil
@@ -75,77 +94,32 @@ func (s *service) ProcessP2PTransfer(ctx context.Context, req TransferRequest) (
 		ReceiverID:    req.ReceiverID,
 		Amount:        req.Amount,
 		Description:   req.Description,
-		Status:        "completed",
-		Currency:      "USD",
-		PaymentMethod: "direct",
-		PaymentType:   "p2p",
-		Metadata:      req.Metadata,
+		Status:        "pending",
 	}
-
-	processed, err := s.ProcessTransaction(ctx, tx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to process transfer: %w", err)
-	}
-
-	return processed, nil
+	return s.ProcessTransaction(ctx, tx)
 }
 
-func (s *service) GetTransaction(ctx context.Context, id string) (*models.Transaction, error) {
-	// Try cache first
-	cacheKey := fmt.Sprintf("%s%s", TransactionCachePrefix, id)
-	if cached, err := s.cache.Get(cacheKey); err == nil {
-		if tx, ok := cached.(*models.Transaction); ok {
-			return tx, nil
-		}
+func (s *service) Process(ctx context.Context, tx *models.Transaction) error {
+	if tx.Type == "debit" {
+		return s.walletService.Process(ctx, tx)
 	}
-
-	// Fallback to database
-	var tx models.Transaction
-	if err := s.db.WithContext(ctx).Where("transaction_id = ?", id).First(&tx).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return nil, ErrTransactionNotFound
-		}
-		return nil, fmt.Errorf("failed to get transaction: %w", err)
-	}
-
-	return &tx, nil
+	return s.walletService.Process(ctx, tx)
 }
 
-func (s *service) ProcessBatchTransactions(ctx context.Context, txs []*models.Transaction) ([]*models.Transaction, error) {
-	results := make([]*models.Transaction, len(txs))
-	for i, tx := range txs {
-		processed, err := s.ProcessTransaction(ctx, tx)
-		if err != nil {
-			return results, fmt.Errorf("failed to process transaction %d: %w", i, err)
-		}
-		results[i] = processed
-	}
-	return results, nil
+func (s *service) Rollback(ctx context.Context, tx *models.Transaction) error {
+	return s.walletService.Rollback(ctx, tx)
 }
 
-func (s *service) ValidateTransaction(ctx context.Context, tx *models.Transaction) error {
-	if tx.Amount <= 0 {
-		return fmt.Errorf("%w: amount must be positive", ErrInvalidStatus)
-	}
+type RiskService struct{}
 
-	if tx.SenderID == 0 || tx.ReceiverID == 0 {
-		return fmt.Errorf("%w: invalid sender or receiver", ErrInvalidStatus)
-	}
-
-	// Validate sender's balance
-	if err := s.wallet.ValidateBalance(ctx, tx.SenderID, tx.Amount); err != nil {
-		return fmt.Errorf("balance validation failed: %w", err)
-	}
-
-	return nil
+func NewRiskService() *RiskService {
+	return &RiskService{}
 }
 
-func (s *service) GetTransactionStatus(ctx context.Context, id string) (string, error) {
-	tx, err := s.GetTransaction(ctx, id)
-	if err != nil {
-		return "", err
+func (s *RiskService) AssessTransaction(tx *models.Transaction) float64 {
+	var riskScore float64 = 0.0
+	if tx.Amount > 10000 {
+		riskScore += 0.3
 	}
-	return tx.Status, nil
+	return riskScore
 }
-
-// Continue with other service methods...

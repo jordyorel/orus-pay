@@ -3,19 +3,24 @@ package handlers
 import (
 	"orus/internal/models"
 	"orus/internal/repositories"
-	"orus/internal/utils/response"
 	"regexp"
 
 	"orus/internal/utils"
 
-	"orus/internal/services/qr"
+	qr "orus/internal/services/qr_code"
 	"orus/internal/services/wallet"
 
 	"fmt"
 	"log"
+	"math"
+	"strconv"
 
 	"github.com/gofiber/fiber/v2"
 	"golang.org/x/crypto/bcrypt"
+)
+
+const (
+	maxTransactionLimit = 100 // Maximum allowed transactions per page
 )
 
 // Regular expressions for input validation
@@ -145,35 +150,38 @@ func (h *UserHandler) RegisterUser(c *fiber.Ctx) error {
 	})
 }
 
-func (h *UserHandler) GeneratePaymentCode(c *fiber.Ctx) error {
-	claims := c.Locals("claims").(*models.UserClaims)
-	qrCode, err := h.qrService.GeneratePaymentCode(c.Context(), claims.UserID)
+func (h *UserHandler) GetUserTransactions(c *fiber.Ctx) error {
+	userID := c.Locals("userID").(uint)
+
+	page, _ := strconv.Atoi(c.Query("page", "1"))
+	limit, _ := strconv.Atoi(c.Query("limit", "10"))
+	if limit > maxTransactionLimit {
+		limit = maxTransactionLimit
+	}
+
+	transactions, err := repositories.GetUserTransactions(userID, limit, (page-1)*limit)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": err.Error(),
+			"error": "Failed to fetch transactions",
 		})
 	}
-	return c.JSON(fiber.Map{"qr_code": qrCode})
-}
 
-func (h *UserHandler) GetReceiveQR(c *fiber.Ctx) error {
-	claims := c.Locals("claims").(*models.UserClaims)
-
-	qr, err := h.qrService.GetUserReceiveQR(c.Context(), claims.UserID)
-	if err != nil {
-		return response.Error(c, fiber.StatusInternalServerError, err.Error())
+	// Sanitize transaction data
+	sanitized := make([]map[string]interface{}, len(transactions))
+	for i, t := range transactions {
+		sanitized[i] = map[string]interface{}{
+			"id":         t.ID,
+			"amount":     math.Round(t.Amount*100) / 100,
+			"status":     t.Status,
+			"type":       t.Type,
+			"created_at": t.CreatedAt,
+		}
 	}
 
-	return response.Success(c, "Your QR code for receiving payments", qr)
-}
-
-func (h *UserHandler) GetPaymentCodeQR(c *fiber.Ctx) error {
-	claims := c.Locals("claims").(*models.UserClaims)
-
-	qr, err := h.qrService.GetUserPaymentCodeQR(c.Context(), claims.UserID)
-	if err != nil {
-		return response.Error(c, fiber.StatusInternalServerError, err.Error())
-	}
-
-	return response.Success(c, "Your QR code for merchant payments", qr)
+	return c.JSON(fiber.Map{
+		"transactions": sanitized,
+		"page":         page,
+		"limit":        limit,
+		"total":        len(sanitized),
+	})
 }

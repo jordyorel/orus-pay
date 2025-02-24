@@ -1,4 +1,4 @@
-package services
+package merchant
 
 type FeeCalculator struct {
 	baseFee     float64

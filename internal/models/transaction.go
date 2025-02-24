@@ -10,9 +10,10 @@ import (
 const (
 	TransactionTypeTopup          = "TOPUP"
 	TransactionTypeWithdrawal     = "WITHDRAWAL"
-	TransactionTypeQRPayment      = "QR_PAYMENT"
-	TransactionTypeMerchantDirect = "MERCHANT_DIRECT"
-	TransactionTypeMerchantScan   = "MERCHANT_SCAN"
+	TransactionTypeQRPayment      = "qr_payment"
+	TransactionTypeMerchantDirect = "merchant_direct"
+	TransactionTypeMerchantScan   = "merchant_scan"
+	TransactionTypeRefund         = "refund"
 )
 
 // Consolidated Transaction model

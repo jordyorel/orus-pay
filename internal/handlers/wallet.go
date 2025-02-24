@@ -1,14 +1,11 @@
 package handlers
 
 import (
-	"errors"
 	"fmt"
 	"log"
 	"orus/internal/models"
 	"orus/internal/repositories"
 	"orus/internal/services"
-	"strconv"
-	"time"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -179,87 +176,6 @@ func WithdrawToCard(c *fiber.Ctx) error {
 			"transaction_id": transaction.ID,
 		})
 	}
-}
-
-// LinkCreditCard links a credit card to the user's account.
-func LinkCreditCard(c *fiber.Ctx) error {
-	// Extract user ID from JWT
-	userID := c.Locals("userID")
-	if userID == nil {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Unauthorized"})
-	}
-
-	// Parse JSON body
-	var card models.CreateCreditCard
-	if err := c.BodyParser(&card); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Invalid request format",
-		})
-	}
-
-	if err := validateCardInput(card); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": err.Error(),
-		})
-	}
-
-	// Call tokenization service
-	tokenizedCard, err := services.TokenizeCreditCard(card)
-	if err != nil {
-		log.Println("Tokenization failed:", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Card tokenization failed"})
-	}
-
-	// Convert CreateCreditCard to CreditCard
-	cardRecord := models.CreditCard{
-		UserID:      userID.(uint),
-		CardNumber:  tokenizedCard.Token,
-		CardType:    tokenizedCard.CardType,
-		ExpiryMonth: card.ExpiryMonth,
-		ExpiryYear:  card.ExpiryYear,
-		Status:      "active",
-	}
-
-	if err := repositories.CreateCreditCard(&cardRecord); err != nil {
-		log.Printf("Failed to save card record: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to link card"})
-	}
-
-	return c.JSON(fiber.Map{
-		"message":   "Credit card linked successfully",
-		"token":     tokenizedCard.Token,
-		"card_type": cardRecord.CardType,
-		"expiry":    fmt.Sprintf("%s/%s", card.ExpiryMonth, card.ExpiryYear),
-	})
-}
-
-// validateCardInput validates the credit card input.
-func validateCardInput(card models.CreateCreditCard) error {
-	if card.CardNumber == "" {
-		return errors.New("card number is required")
-	}
-	if card.ExpiryMonth == "" || card.ExpiryYear == "" {
-		return errors.New("expiry date is required")
-	}
-
-	// Convert expiry dates to integers for validation
-	month, err := strconv.Atoi(card.ExpiryMonth)
-	if err != nil || month < 1 || month > 12 {
-		return errors.New("invalid expiry month")
-	}
-
-	year, err := strconv.Atoi(card.ExpiryYear)
-	if err != nil {
-		return errors.New("invalid expiry year")
-	}
-
-	// Validate expiry date
-	now := time.Now()
-	if year < now.Year() || (year == now.Year() && month < int(now.Month())) {
-		return errors.New("card has expired")
-	}
-
-	return nil
 }
 
 // GetWallet retrieves the user's wallet details.

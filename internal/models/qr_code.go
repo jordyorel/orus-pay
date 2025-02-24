@@ -28,8 +28,8 @@ type QRCode struct {
 
 	DailyLimit       *float64
 	MonthlyLimit     *float64
-	AllowedCustomers []uint                 `gorm:"type:integer[]"`
-	Metadata         map[string]interface{} `gorm:"type:jsonb"`
+	AllowedCustomers []uint `gorm:"type:integer[]"`
+	Metadata         JSON   `gorm:"type:jsonb"`
 }
 
 type QRTransaction struct {

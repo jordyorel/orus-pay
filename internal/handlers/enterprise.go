@@ -2,18 +2,18 @@ package handlers
 
 import (
 	"orus/internal/models"
-	"orus/internal/services"
+	"orus/internal/services/enterprise"
 
 	"github.com/gofiber/fiber/v2"
 )
 
 type EnterpriseHandler struct {
-	enterpriseService *services.EnterpriseService
+	enterpriseService *enterprise.EnterpriseService
 }
 
 func NewEnterpriseHandler() *EnterpriseHandler {
 	return &EnterpriseHandler{
-		enterpriseService: services.NewEnterpriseService(),
+		enterpriseService: enterprise.NewEnterpriseService(),
 	}
 }
 

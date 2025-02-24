@@ -1,9 +1,10 @@
 package handlers
 
 import (
+	"fmt"
 	"orus/internal/models"
-	"orus/internal/services/qr"
-	"orus/internal/services/transaction"
+	qr "orus/internal/services/qr_code"
+	transaction "orus/internal/services/transaction"
 	"orus/internal/utils/response"
 	"orus/internal/utils/validation"
 
@@ -22,7 +23,7 @@ func NewPaymentHandler(qrSvc qr.Service, txSvc transaction.Service) *PaymentHand
 	}
 }
 
-// ProcessQRPayment handles QR code payments
+// ProcessQRPayment handles QR code payments for both users and merchants
 func (h *PaymentHandler) ProcessQRPayment(c *fiber.Ctx) error {
 	claims := c.Locals("claims").(*models.UserClaims)
 
@@ -35,6 +36,20 @@ func (h *PaymentHandler) ProcessQRPayment(c *fiber.Ctx) error {
 
 	if err := c.BodyParser(&input); err != nil {
 		return response.BadRequest(c, "Invalid request format")
+	}
+
+	// Enrich metadata based on who is scanning
+	if input.Metadata == nil {
+		input.Metadata = make(map[string]interface{})
+	}
+	input.Metadata["scanner_role"] = claims.Role
+	input.Metadata["scanner_id"] = claims.UserID
+
+	// Add payment context to description
+	if claims.Role == "merchant" {
+		input.Description = fmt.Sprintf("Merchant payment: %s", input.Description)
+	} else {
+		input.Description = fmt.Sprintf("User payment: %s", input.Description)
 	}
 
 	tx, err := h.qrService.ProcessQRPayment(

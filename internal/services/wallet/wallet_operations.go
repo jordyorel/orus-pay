@@ -81,7 +81,7 @@ func (s *WalletService) ProcessOperation(ctx context.Context, op WalletOperation
 			Status:        "completed",
 			Reference:     op.Reference,
 			Description:   fmt.Sprintf("%s operation", op.Operation),
-			Metadata:      op.Metadata,
+			Metadata:      models.NewJSON(op.Metadata),
 			Currency:      "USD", // Default currency
 		}
 
