@@ -3,9 +3,10 @@ package handlers
 import (
 	"orus/internal/models"
 	"orus/internal/repositories"
+	"orus/internal/utils"
 	"regexp"
 
-	"orus/internal/utils"
+	"orus/internal/validation"
 
 	qr "orus/internal/services/qr_code"
 	"orus/internal/services/wallet"
@@ -13,15 +14,12 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"strconv"
 
 	"github.com/gofiber/fiber/v2"
 	"golang.org/x/crypto/bcrypt"
 )
 
-const (
-	maxTransactionLimit = 100 // Maximum allowed transactions per page
-)
+const maxTransactionLimit = 100 // Maximum allowed transactions per page
 
 // Regular expressions for input validation
 var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
@@ -65,7 +63,7 @@ func (h *UserHandler) RegisterUser(c *fiber.Ctx) error {
 	}
 
 	// Validate password
-	if len(input.Password) < 8 || !utils.HasSpecialChar(input.Password) {
+	if len(input.Password) < 8 || !validation.HasSpecialChar(input.Password) {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": "Password must be at least 8 characters and contain special characters",
 		})
@@ -151,19 +149,18 @@ func (h *UserHandler) RegisterUser(c *fiber.Ctx) error {
 }
 
 func (h *UserHandler) GetUserTransactions(c *fiber.Ctx) error {
-	userID := c.Locals("userID").(uint)
-
-	page, _ := strconv.Atoi(c.Query("page", "1"))
-	limit, _ := strconv.Atoi(c.Query("limit", "10"))
-	if limit > maxTransactionLimit {
-		limit = maxTransactionLimit
+	claims, ok := c.Locals("claims").(*models.UserClaims)
+	if !ok {
+		return utils.Unauthorized(c, "invalid claims")
 	}
+	userID := claims.UserID
 
-	transactions, err := repositories.GetUserTransactions(userID, limit, (page-1)*limit)
+	pagination := utils.GetPagination(c, 1, maxTransactionLimit)
+
+	transactions, err := repositories.GetUserTransactions(userID, pagination.Limit, pagination.Offset)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Failed to fetch transactions",
-		})
+		log.Printf("Error fetching transactions: %v", err)
+		return utils.InternalError(c, "Failed to fetch transactions")
 	}
 
 	// Sanitize transaction data
@@ -180,8 +177,10 @@ func (h *UserHandler) GetUserTransactions(c *fiber.Ctx) error {
 
 	return c.JSON(fiber.Map{
 		"transactions": sanitized,
-		"page":         page,
-		"limit":        limit,
-		"total":        len(sanitized),
+		"pagination": fiber.Map{
+			"current_page": pagination.Page,
+			"total_pages":  utils.TotalPages(int64(len(transactions)), pagination.Limit),
+			"total_items":  len(transactions),
+		},
 	})
 }

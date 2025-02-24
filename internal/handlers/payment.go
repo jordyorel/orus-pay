@@ -6,7 +6,7 @@ import (
 	qr "orus/internal/services/qr_code"
 	transaction "orus/internal/services/transaction"
 	"orus/internal/utils/response"
-	"orus/internal/utils/validation"
+	"orus/internal/validation"
 
 	"github.com/gofiber/fiber/v2"
 )
