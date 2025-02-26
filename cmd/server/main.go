@@ -1,10 +1,15 @@
+// Package main is the entry point for the application.
+// It initializes all dependencies, sets up the HTTP server,
+// and starts the application.
 package main
 
 import (
 	"log"
 	"orus/internal/config"
-	"orus/internal/handlers"
+
+	// "orus/internal/handlers"
 	"orus/internal/repositories"
+	"orus/internal/routes"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -13,6 +18,13 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/logger"
 )
 
+// main initializes and starts the HTTP server.
+// It performs the following setup:
+// - Loads configuration
+// - Initializes database connection
+// - Sets up dependency injection
+// - Configures routes
+// - Starts the HTTP server
 func main() {
 	// Load environment variables
 	config.LoadEnv()
@@ -92,7 +104,7 @@ func main() {
 	}))
 
 	// Routes
-	handlers.SetupRoutes(app, repositories.DB)
+	routes.SetupRoutes(app, repositories.DB)
 
 	// Start server
 	log.Fatal(app.Listen(":" + config.GetEnv("PORT", "3000")))

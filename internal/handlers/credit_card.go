@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"orus/internal/models"
+	"orus/internal/repositories"
 	creditcard "orus/internal/services/credit-card"
 	"orus/internal/utils/response"
 
@@ -9,12 +10,12 @@ import (
 )
 
 type CreditCardHandler struct {
-	cardService *creditcard.Service
+	cardService creditcard.Service
 }
 
-func NewCreditCardHandler() *CreditCardHandler {
+func NewCreditCardHandler(cardRepo repositories.CreditCardRepository) *CreditCardHandler {
 	return &CreditCardHandler{
-		cardService: creditcard.NewService(),
+		cardService: creditcard.NewService(cardRepo),
 	}
 }
 

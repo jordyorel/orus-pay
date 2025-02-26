@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-func (s *Service) validateCardInput(card CreateCardInput) error {
+func (s *serviceImpl) validateCardInput(card CreateCardInput) error {
 	if card.CardNumber == "" {
 		return errors.New("card number is required")
 	}

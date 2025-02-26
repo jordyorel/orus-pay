@@ -1,15 +1,21 @@
-package handlers
+// Package routes defines the API routing configuration.
+// It sets up all HTTP routes and their corresponding handlers,
+// including middleware and authentication requirements.
+package routes
 
 import (
+	"orus/internal/config"
+	"orus/internal/handlers"
 	"orus/internal/middleware"
 	"orus/internal/models"
 	"orus/internal/repositories"
 	"orus/internal/services/auth"
-	"orus/internal/services/credit_card"
+	creditcard "orus/internal/services/credit-card"
 	"orus/internal/services/merchant"
 	"orus/internal/services/payment"
 	qr "orus/internal/services/qr_code"
 	"orus/internal/services/transaction"
+	"orus/internal/services/user"
 	"orus/internal/services/wallet"
 
 	"github.com/gofiber/fiber/v2"
@@ -19,6 +25,8 @@ import (
 
 var walletService wallet.Service
 
+// SetupRoutes configures all application routes.
+// It groups routes by functionality and applies appropriate middleware.
 func SetupRoutes(app *fiber.App, db *gorm.DB) {
 	// Initialize cache
 	redisClient := redis.NewClient(&redis.Options{
@@ -32,11 +40,14 @@ func SetupRoutes(app *fiber.App, db *gorm.DB) {
 	cardRepo := repositories.NewCreditCardRepository(repositories.DB)
 
 	// Initialize auth service and handler
-	authService := auth.NewService(userRepo)
-	authHandler := NewAuthHandler(authService)
+	jwtSecret := config.GetEnv("JWT_SECRET", "your-secret-key")
+	refreshSecret := config.GetEnv("REFRESH_SECRET", "your-refresh-secret")
+	authService := auth.NewService(userRepo, jwtSecret, refreshSecret)
+	authHandler := handlers.NewAuthHandler(authService, refreshSecret)
 
 	// Initialize services in correct order
-	cardService := credit_card.NewService(cardRepo)
+	cardService := creditcard.NewService(cardRepo)
+	userService := user.NewService(userRepo)
 	walletService = wallet.NewService(
 		walletRepo,
 		cacheRepo,
@@ -62,37 +73,37 @@ func SetupRoutes(app *fiber.App, db *gorm.DB) {
 	paymentService := payment.NewService(walletService, transactionService, qrService)
 
 	// Initialize handlers
-	paymentHandler := NewPaymentHandler(qrService, paymentService)
-	merchantHandler := NewMerchantHandler(
+	paymentHandler := handlers.NewPaymentHandler(qrService, paymentService)
+	merchantHandler := handlers.NewMerchantHandler(
 		merchant.NewService(qrService, transactionService, walletService),
 		qrService,
 	)
-	enterpriseHandler := NewEnterpriseHandler()
-	userHandler := NewUserHandler(qrService, walletService)
-	cardHandler := NewCreditCardHandler()
+	enterpriseHandler := handlers.NewEnterpriseHandler()
+	userHandler := handlers.NewUserHandler(userService, walletService, qrService)
+	cardHandler := handlers.NewCreditCardHandler(cardRepo)
 
 	// Public routes
-	app.Get("/health", HealthCheck)
-	app.Get("/", func(c *fiber.Ctx) error { return c.SendString("Welcome to OrusPay API!") })
-
 	api := app.Group("/api")
 	api.Post("/register", userHandler.RegisterUser)
 	api.Post("/login", authHandler.LoginUser)
 	api.Post("/refresh", authHandler.RefreshToken)
 
-	// Authenticated routes
-	authenticated := app.Group("/api", middleware.AuthMiddleware)
+	// Create middleware instance
+	authMiddleware := middleware.NewAuthMiddleware(authService)
+
+	// Protected routes with auth middleware
+	protected := api.Use(authMiddleware.Handler)
 
 	// Setup different route groups
-	setupUserRoutes(authenticated, paymentHandler, userHandler, cardHandler, authHandler)
-	setupMerchantRoutes(authenticated, merchantHandler, paymentHandler)
-	setupEnterpriseRoutes(authenticated, enterpriseHandler)
-	setupAdminRoutes(app)
+	setupUserRoutes(protected, paymentHandler, userHandler, cardHandler, authHandler)
+	setupMerchantRoutes(protected, merchantHandler, paymentHandler)
+	setupEnterpriseRoutes(protected, enterpriseHandler)
+	setupAdminRoutes(app, jwtSecret)
 }
 
-func setupUserRoutes(router fiber.Router, paymentHandler *PaymentHandler, userHandler *UserHandler, cardHandler *CreditCardHandler, authHandler *AuthHandler) {
+func setupUserRoutes(router fiber.Router, paymentHandler *handlers.PaymentHandler, userHandler *handlers.UserHandler, cardHandler *handlers.CreditCardHandler, authHandler *handlers.AuthHandler) {
 	// Initialize wallet handler
-	walletHandler := NewWalletHandler(walletService)
+	walletHandler := handlers.NewWalletHandler(walletService)
 
 	// Wallet routes
 	wallet := router.Group("/wallet")
@@ -116,7 +127,7 @@ func setupUserRoutes(router fiber.Router, paymentHandler *PaymentHandler, userHa
 	payments.Post("/send", paymentHandler.SendMoney)        //✅
 }
 
-func setupMerchantRoutes(router fiber.Router, h *MerchantHandler, paymentHandler *PaymentHandler) {
+func setupMerchantRoutes(router fiber.Router, h *handlers.MerchantHandler, paymentHandler *handlers.PaymentHandler) {
 	merchant := router.Group("/merchant", middleware.HasPermission(models.PermissionMerchantRead))
 
 	// Profile Management
@@ -134,18 +145,19 @@ func setupMerchantRoutes(router fiber.Router, h *MerchantHandler, paymentHandler
 	merchant.Post("/:merchantId/webhook", middleware.HasPermission(models.PermissionMerchantWrite), h.SetWebhookURL)
 }
 
-func setupEnterpriseRoutes(router fiber.Router, h *EnterpriseHandler) {
+func setupEnterpriseRoutes(router fiber.Router, h *handlers.EnterpriseHandler) {
 	enterprise := router.Group("/enterprise", middleware.HasPermission("enterprise:read"))
 	enterprise.Post("/", h.CreateEnterprise)
 	enterprise.Post("/:enterpriseId/apikey", h.GenerateAPIKey)
 }
 
-func setupAdminRoutes(app *fiber.App) {
-	admin := app.Group("/api/admin", middleware.AdminAuthMiddleware)
+func setupAdminRoutes(app *fiber.App, jwtSecret string) {
+	// First apply auth middleware, then admin check
+	admin := app.Group("/api/admin", middleware.CreateAuthMiddleware(jwtSecret), middleware.AdminAuthMiddleware)
 
-	admin.Get("/transactions", middleware.HasPermission(models.PermissionReadAdmin), GetAllTransactions)
-	admin.Get("/users", middleware.HasPermission(models.PermissionReadAdmin), GetUsersPaginated)
-	admin.Delete("/users/:id", middleware.HasPermission(models.PermissionWriteAdmin), DeleteUser)
-	admin.Get("/wallets", middleware.HasPermission(models.PermissionWriteAdmin), GetAllWallets)
-	admin.Get("/credit-cards", middleware.HasPermission(models.PermissionWriteAdmin), GetAllCreditCards)
+	admin.Get("/transactions", middleware.HasPermission(models.PermissionReadAdmin), handlers.GetAllTransactions)
+	admin.Get("/users", middleware.HasPermission(models.PermissionReadAdmin), handlers.GetUsersPaginated)
+	admin.Delete("/users/:id", middleware.HasPermission(models.PermissionWriteAdmin), handlers.DeleteUser)
+	admin.Get("/wallets", middleware.HasPermission(models.PermissionWriteAdmin), handlers.GetAllWallets)
+	admin.Get("/credit-cards", middleware.HasPermission(models.PermissionWriteAdmin), handlers.GetAllCreditCards)
 }

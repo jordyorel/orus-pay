@@ -1,3 +1,7 @@
+// Package qr provides types and constants for QR code functionality.
+// It defines the core domain types for QR code generation and processing,
+// including different QR types (static, dynamic, payment) and associated limits
+// based on user types.
 package qr
 
 import (

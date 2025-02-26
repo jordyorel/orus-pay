@@ -1,143 +1,170 @@
 package handlers
 
 import (
-	"fmt"
-	"log"
-	"math"
 	"orus/internal/models"
-	"orus/internal/repositories"
 	qr "orus/internal/services/qr_code"
+	"orus/internal/services/user"
 	"orus/internal/services/wallet"
-	"orus/internal/utils"
-	"orus/internal/validation"
+	"orus/internal/utils/response"
+	"strconv"
 
 	"github.com/gofiber/fiber/v2"
-	"golang.org/x/crypto/bcrypt"
 )
 
-const maxTransactionLimit = 100 // Maximum allowed transactions per page
+// const maxTransactionLimit = 100 // Maximum allowed transactions per page
 
+// UserHandler manages user-related HTTP requests including registration,
+// profile management, and user settings.
 type UserHandler struct {
-	qrService     qr.Service
+	userService   user.Service
 	walletService wallet.Service
+	qrService     qr.Service
 }
 
-func NewUserHandler(qrSvc qr.Service, walletSvc wallet.Service) *UserHandler {
+func NewUserHandler(userService user.Service, walletService wallet.Service, qrService qr.Service) *UserHandler {
 	return &UserHandler{
-		qrService:     qrSvc,
-		walletService: walletSvc,
+		userService:   userService,
+		walletService: walletService,
+		qrService:     qrService,
 	}
 }
 
+// RegisterUser handles new user registration requests.
+// It creates a new user account, associated wallet, and generates initial QR codes.
+//
+// Request body should contain:
+// - name: User's full name
+// - email: User's email address
+// - phone: User's phone number (optional)
+// - password: User's password
+//
+// Returns:
+// - 200: Successful registration with user details and initial QR codes
+// - 400: Invalid request format or validation errors
+// - 500: Internal server error during user creation
 func (h *UserHandler) RegisterUser(c *fiber.Ctx) error {
 	var input models.CreateUserInput
 	if err := c.BodyParser(&input); err != nil {
-		return utils.BadRequest(c, "Invalid request body")
+		return response.BadRequest(c, "Invalid request body")
 	}
 
-	v := validation.New()
-	v.UserRegistration(&input)
-	if !v.Valid() {
-		// Get first error from the map
-		for _, msg := range v.Errors {
-			return utils.BadRequest(c, msg)
-		}
-	}
-
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
+	user, err := h.userService.Create(&input)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Password hashing failed"})
-	}
-
-	// Create base user
-	user := &models.User{
-		Name:     input.Name,
-		Email:    input.Email,
-		Phone:    input.Phone,
-		Password: string(hashedPassword),
-		Role:     input.Role,
-		Status:   "active",
-		MerchantProfileStatus: func() string {
-			if input.Role == "merchant" {
-				return "pending_completion"
-			}
-			return "not_applicable"
-		}(),
-	}
-
-	createdUser, _, err := repositories.CreateUser(user)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": err.Error(),
-		})
+		return response.Error(c, fiber.StatusInternalServerError, err.Error())
 	}
 
 	// Create wallet for the new user
-	wallet, err := h.walletService.CreateWallet(c.Context(), createdUser.ID, "USD")
+	wallet, err := h.walletService.CreateWallet(c.Context(), user.ID, "USD")
 	if err != nil {
-		log.Printf("Failed to create wallet for user %d: %v", createdUser.ID, err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Failed to create wallet",
-		})
+		return response.Error(c, fiber.StatusInternalServerError, "Failed to create wallet")
 	}
 
-	// Get both QR codes
-	receiveQR, err := h.qrService.GetUserReceiveQR(c.Context(), createdUser.ID)
+	// Generate QR codes
+	receiveQR, err := h.qrService.GetUserReceiveQR(c.Context(), user.ID)
 	if err != nil {
-		log.Printf("Failed to generate receive QR: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": fmt.Sprintf("Failed to generate receive QR: %v", err),
-		})
+		return response.Error(c, fiber.StatusInternalServerError, "Failed to generate receive QR")
 	}
 
-	paymentCodeQR, err := h.qrService.GetUserPaymentCodeQR(c.Context(), createdUser.ID)
+	paymentQR, err := h.qrService.GetUserPaymentCodeQR(c.Context(), user.ID)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Failed to generate payment code QR",
-		})
+		return response.Error(c, fiber.StatusInternalServerError, "Failed to generate payment QR")
 	}
 
-	// Update user with wallet info
-	createdUser.WalletID = &wallet.ID
-	createdUser.Wallet = wallet // Include the wallet object
-	createdUser.Password = ""
+	// Hide sensitive data
+	user.Password = ""
+	user.WalletID = &wallet.ID
+	user.Wallet = wallet
 
-	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-		"message":         "User registered successfully",
-		"user":            createdUser,
+	return response.Success(c, "User registered successfully", fiber.Map{
+		"user":            user,
 		"receive_qr":      receiveQR,
-		"payment_code_qr": paymentCodeQR,
+		"payment_code_qr": paymentQR,
 	})
 }
 
-func (h *UserHandler) GetUserTransactions(c *fiber.Ctx) error {
-	claims, ok := c.Locals("claims").(*models.UserClaims)
-	if !ok {
-		return utils.Unauthorized(c, "invalid claims")
-	}
-	userID := claims.UserID
+// GetProfile returns the user's profile
+func (h *UserHandler) GetProfile(c *fiber.Ctx) error {
+	claims := c.Locals("claims").(*models.UserClaims)
 
-	pagination := utils.GetPagination(c, 1, maxTransactionLimit)
-
-	transactions, err := repositories.GetUserTransactions(userID, pagination.Limit, pagination.Offset)
+	user, err := h.userService.GetByID(claims.UserID)
 	if err != nil {
-		log.Printf("Error fetching transactions: %v", err)
-		return utils.InternalError(c, "Failed to fetch transactions")
+		return response.Error(c, fiber.StatusInternalServerError, "Failed to get user profile")
 	}
 
-	pagination.SetTotal(int64(len(transactions)))
+	// Hide sensitive data
+	user.Password = ""
 
-	// Sanitize transaction data
-	sanitized := make([]map[string]interface{}, len(transactions))
-	for i, t := range transactions {
-		sanitized[i] = map[string]interface{}{
-			"id":         t.ID,
-			"amount":     math.Round(t.Amount*100) / 100,
-			"status":     t.Status,
-			"type":       t.Type,
-			"created_at": t.CreatedAt,
-		}
+	return response.Success(c, "Profile retrieved", user)
+}
+
+// UpdateProfile updates the user's profile
+func (h *UserHandler) UpdateProfile(c *fiber.Ctx) error {
+	claims := c.Locals("claims").(*models.UserClaims)
+
+	var input models.UpdateUserInput
+	if err := c.BodyParser(&input); err != nil {
+		return response.BadRequest(c, "Invalid request body")
 	}
 
-	return c.JSON(utils.NewPaginatedResponse(sanitized, pagination))
+	user, err := h.userService.GetByID(claims.UserID)
+	if err != nil {
+		return response.Error(c, fiber.StatusInternalServerError, "Failed to get user")
+	}
+
+	// Update fields
+	if input.Name != "" {
+		user.Name = input.Name
+	}
+	if input.Phone != "" {
+		user.Phone = input.Phone
+	}
+
+	if err := h.userService.Update(user); err != nil {
+		return response.Error(c, fiber.StatusInternalServerError, "Failed to update profile")
+	}
+
+	return response.Success(c, "Profile updated", nil)
+}
+
+// ChangePassword changes the user's password
+func (h *UserHandler) ChangePassword(c *fiber.Ctx) error {
+	claims := c.Locals("claims").(*models.UserClaims)
+
+	var input struct {
+		OldPassword string `json:"old_password"`
+		NewPassword string `json:"new_password"`
+	}
+
+	if err := c.BodyParser(&input); err != nil {
+		return response.BadRequest(c, "Invalid request body")
+	}
+
+	if err := h.userService.ChangePassword(claims.UserID, input.OldPassword, input.NewPassword); err != nil {
+		return response.Error(c, fiber.StatusBadRequest, err.Error())
+	}
+
+	return response.Success(c, "Password changed successfully", nil)
+}
+
+// GetUserTransactions returns the user's transactions
+func (h *UserHandler) GetUserTransactions(c *fiber.Ctx) error {
+	claims := c.Locals("claims").(*models.UserClaims)
+
+	// Get pagination parameters
+	page, _ := strconv.Atoi(c.Query("page", "1"))
+	limit, _ := strconv.Atoi(c.Query("limit", "10"))
+
+	transactions, total, err := h.userService.GetTransactions(claims.UserID, page, limit)
+	if err != nil {
+		return response.Error(c, fiber.StatusInternalServerError, "Failed to fetch transactions")
+	}
+
+	return response.Success(c, "Transactions retrieved", fiber.Map{
+		"transactions": transactions,
+		"pagination": fiber.Map{
+			"page":  page,
+			"limit": limit,
+			"total": total,
+		},
+	})
 }

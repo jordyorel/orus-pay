@@ -208,7 +208,8 @@ func (h *MerchantHandler) UpdateMerchantProfile(c *fiber.Ctx) error {
 		"business_hours":  input.BusinessHours,
 	})
 
-	if err := repositories.UpdateMerchant(merchant); err != nil {
+	// Use DB.Save instead of repositories.UpdateMerchant to ensure we're updating not creating
+	if err := repositories.DB.Save(merchant).Error; err != nil {
 		return response.Error(c, fiber.StatusInternalServerError, "Failed to update merchant profile")
 	}
 

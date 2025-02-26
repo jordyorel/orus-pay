@@ -4,6 +4,7 @@ import (
 	"time"
 )
 
+// Transaction types
 const (
 	TransactionTypeTopup          = "TOPUP"
 	TransactionTypeWithdrawal     = "WITHDRAWAL"
@@ -11,6 +12,9 @@ const (
 	TransactionTypeMerchantDirect = "merchant_direct"
 	TransactionTypeMerchantScan   = "merchant_scan"
 	TransactionTypeRefund         = "refund"
+	TransactionTypeP2PTransfer    = "P2P_TRANSFER"
+	TransactionTypeTransfer       = "transfer"
+	TransactionTypeQRCode         = "QR_PAYMENT"
 )
 
 // Consolidated Transaction model

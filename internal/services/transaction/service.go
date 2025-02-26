@@ -61,7 +61,9 @@ func (s *service) ProcessTransaction(ctx context.Context, tx *models.Transaction
 
 	// Process based on transaction type
 	switch tx.Type {
-	case models.TransactionTypeMerchantDirect, models.TransactionTypeQRPayment, "P2P_TRANSFER", "transfer", "QR_PAYMENT", models.TransactionTypeMerchantScan:
+	case models.TransactionTypeMerchantDirect, models.TransactionTypeQRPayment,
+		models.TransactionTypeP2PTransfer, models.TransactionTypeTransfer,
+		models.TransactionTypeQRCode, models.TransactionTypeMerchantScan:
 		if err := s.db.Transaction(func(txn *gorm.DB) error {
 			if err := s.walletService.Debit(ctxWithRole, tx.SenderID, tx.Amount); err != nil {
 				return err

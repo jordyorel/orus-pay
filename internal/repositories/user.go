@@ -199,3 +199,27 @@ func IncrementUserTokenVersion(userID uint) error {
 	user.TokenVersion++
 	return DB.Save(&user).Error
 }
+
+// Instead, implement the function at the package level
+func GetUserTransactionsPaginated(userID uint, limit, offset int) ([]models.Transaction, int64, error) {
+	var transactions []models.Transaction
+	var total int64
+
+	// Count total transactions
+	if err := DB.Model(&models.Transaction{}).
+		Where("sender_id = ? OR receiver_id = ?", userID, userID).
+		Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	// Get paginated transactions
+	if err := DB.Where("sender_id = ? OR receiver_id = ?", userID, userID).
+		Order("created_at DESC").
+		Limit(limit).
+		Offset(offset).
+		Find(&transactions).Error; err != nil {
+		return nil, 0, err
+	}
+
+	return transactions, total, nil
+}

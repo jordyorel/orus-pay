@@ -3,6 +3,7 @@ package repositories
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"orus/internal/models"
 )
@@ -56,7 +57,11 @@ func CreateMerchant(merchant *models.Merchant) error {
 }
 
 func UpdateMerchant(merchant *models.Merchant) error {
-	return DB.Save(merchant).Error
+	// Ensure we're updating an existing record by using the ID
+	if merchant.ID == 0 {
+		return errors.New("cannot update merchant with ID 0")
+	}
+	return DB.Model(&models.Merchant{}).Where("id = ?", merchant.ID).Updates(merchant).Error
 }
 
 func GetMerchantTransactions(merchantID uint) ([]models.Transaction, error) {

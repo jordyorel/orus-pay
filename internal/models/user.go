@@ -35,3 +35,10 @@ type CreateUserInput struct {
 	Password string `json:"password"`
 	Role     string `json:"role"`
 }
+
+// UpdateUserInput represents the data needed to update a user
+type UpdateUserInput struct {
+	Name  string `json:"name"`
+	Phone string `json:"phone"`
+	Email string `json:"email"`
+}

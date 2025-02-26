@@ -1,3 +1,5 @@
+// Package repositories provides data access layer implementations.
+// It handles all database operations and data persistence logic.
 package repositories
 
 import (
@@ -13,10 +15,13 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-var (
-	DB *gorm.DB
-)
+// DB is the global database instance used across the application.
+// It provides access to the underlying database connection.
+var DB *gorm.DB
 
+// InitDB initializes the database connection.
+// It sets up the connection pool, performs migrations,
+// and configures the database with proper settings.
 func InitDB() error {
 	initPostgres()
 	InitRedis()
@@ -37,7 +42,6 @@ func InitDB() error {
 		return err
 	}
 
-	log.Println("✅ Migrations applied successfully!")
 	return nil
 }
 

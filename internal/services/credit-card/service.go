@@ -8,17 +8,19 @@ import (
 	"orus/internal/repositories"
 )
 
-type Service struct {
+type serviceImpl struct {
 	tokenizer Tokenizer
+	repo      repositories.CreditCardRepository
 }
 
-func NewService() *Service {
-	return &Service{
+func NewService(repo repositories.CreditCardRepository) Service {
+	return &serviceImpl{
 		tokenizer: NewTokenizer(),
+		repo:      repo,
 	}
 }
 
-func (s *Service) LinkCard(userID uint, input CreateCardInput) (*models.CreditCard, error) {
+func (s *serviceImpl) LinkCard(userID uint, input CreateCardInput) (*models.CreditCard, error) {
 	if err := s.validateCardInput(input); err != nil {
 		return nil, err
 	}
@@ -45,11 +47,11 @@ func (s *Service) LinkCard(userID uint, input CreateCardInput) (*models.CreditCa
 	return cardRecord, nil
 }
 
-func (s *Service) GetUserCards(userID uint) ([]models.CreditCard, error) {
+func (s *serviceImpl) GetUserCards(userID uint) ([]models.CreditCard, error) {
 	return repositories.GetCreditCardsByUserID(userID)
 }
 
-func (s *Service) DeleteCard(userID uint, cardID uint) error {
+func (s *serviceImpl) DeleteCard(userID uint, cardID uint) error {
 	card, err := repositories.GetCreditCardByID(cardID)
 	if err != nil {
 		return err

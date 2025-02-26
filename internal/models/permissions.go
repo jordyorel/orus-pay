@@ -39,20 +39,20 @@ func GetDefaultPermissions(role string) []string {
 	switch role {
 	case "admin":
 		return []string{
+			PermissionReadAdmin,
+			PermissionWriteAdmin,
 			PermissionWalletRead,
 			PermissionWalletWrite,
 			PermissionTransactionRead,
 			PermissionTransactionWrite,
-			PermissionPaymentWrite,
 			PermissionCreditCardWrite,
 			PermissionUserRead,
 			PermissionUserWrite,
 			PermissionChangePassword,
-			PermissionReadAdmin,
-			PermissionWriteAdmin,
 			PermissionMerchantRead,
 			PermissionMerchantWrite,
 			PermissionMerchantCreate,
+			PermissionPaymentWrite,
 		}
 	case "regular", "user":
 		return []string{

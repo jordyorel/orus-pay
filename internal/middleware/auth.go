@@ -1,36 +1,94 @@
+// Package middleware provides HTTP middleware components for the application.
+// It includes authentication, authorization, and other request processing middleware
+// that can be used with the fiber web framework.
 package middleware
 
 import (
 	"log"
 	"strings"
 
+	"orus/internal/config"
 	"orus/internal/models"
-	"orus/internal/utils"
+	"orus/internal/services/auth"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/golang-jwt/jwt/v5"
 )
 
-// AuthMiddleware verifies the JWT token from the Authorization header.
-func AuthMiddleware(c *fiber.Ctx) error {
-	tokenString := c.Get("Authorization")
-	// Try cookie if header is empty
-	if tokenString == "" {
-		tokenString = c.Cookies("access_token")
-	} else {
-		// Remove Bearer prefix if present
-		tokenString = strings.TrimPrefix(tokenString, "Bearer ")
+// AuthMiddleware handles JWT token validation and user authentication.
+// It extracts the JWT token from the Authorization header, validates it,
+// and adds the user claims to the request context.
+type AuthMiddleware struct {
+	authService auth.Service
+}
+
+func NewAuthMiddleware(authService auth.Service) *AuthMiddleware {
+	return &AuthMiddleware{
+		authService: authService,
+	}
+}
+
+// Handler validates JWT tokens and adds claims to the request context.
+// It checks for:
+// - Presence of Authorization header with Bearer token
+// - Valid JWT signature
+// - Token expiration
+// - Token version matches current user version
+func (m *AuthMiddleware) Handler(c *fiber.Ctx) error {
+	// Get the Authorization header
+	authHeader := c.Get("Authorization")
+	if authHeader == "" {
+		log.Println("Missing Authorization header")
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "missing authorization header"})
 	}
 
-	if tokenString == "" {
-		return utils.Unauthorized(c, "missing auth token")
+	// Check if the header has the Bearer prefix
+	if !strings.HasPrefix(authHeader, "Bearer ") {
+		log.Println("Invalid Authorization format")
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid authorization format"})
 	}
 
-	_, claims, err := utils.ParseToken(tokenString)
+	// Extract the token
+	tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+
+	// Parse and validate the token
+	token, err := jwt.ParseWithClaims(tokenString, &models.UserClaims{}, func(token *jwt.Token) (interface{}, error) {
+		return []byte(config.GetEnv("JWT_SECRET", "your-secret-key")), nil
+	})
+
 	if err != nil {
-		return utils.Unauthorized(c, "invalid token")
+		log.Printf("Token validation error: %v", err)
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid token"})
 	}
+
+	// Check if the token is valid
+	if !token.Valid {
+		log.Println("Token is invalid")
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid token"})
+	}
+
+	// Extract the claims
+	claims, ok := token.Claims.(*models.UserClaims)
+	if !ok {
+		log.Println("Failed to extract claims")
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid claims"})
+	}
+
+	// Get current token version from auth service
+	currentVersion, err := m.authService.GetUserTokenVersion(claims.UserID)
+	if err != nil {
+		log.Printf("Error getting token version: %v", err)
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid token"})
+	}
+
+	// Check if token version matches current version
+	if claims.TokenVersion != currentVersion {
+		log.Printf("Token version mismatch. Token: %d, Current: %d", claims.TokenVersion, currentVersion)
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "token has been invalidated"})
+	}
+
+	// Store the claims in the context
 	c.Locals("claims", claims)
-	// Also set userID for convenience
 	c.Locals("userID", claims.UserID)
 
 	return c.Next()
@@ -44,12 +102,16 @@ func AdminAuthMiddleware(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid claims"})
 	}
 
-	if !claims.HasPermission(models.PermissionReadAdmin) {
+	// Add debug logging
+	log.Printf("User role: %s", claims.Role)
+	log.Printf("User permissions: %v", claims.Permissions)
+
+	// Check both role and permission
+	if claims.Role != "admin" || !claims.HasPermission(models.PermissionReadAdmin) {
 		log.Println("Insufficient permissions")
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "Insufficient permissions"})
 	}
 
-	log.Println("Admin authenticated successfully")
 	return c.Next()
 }
 
@@ -62,9 +124,16 @@ func HasPermission(permission string) fiber.Handler {
 		}
 		log.Printf("Checking permission: %s", permission)
 		log.Printf("User claims: %+v", claims)
+
+		// If user is admin, allow all permissions
+		if claims.Role == "admin" {
+			return c.Next()
+		}
+
 		if claims.HasPermission(permission) {
 			return c.Next()
 		}
+
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "Insufficient permissions"})
 	}
 }
@@ -120,4 +189,54 @@ func hasRequiredRole(userRole, requiredRole string) bool {
 	}
 
 	return userRoleLevel >= requiredRoleLevel
+}
+
+// Create a middleware factory that accepts the JWT secret
+func CreateAuthMiddleware(jwtSecret string) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		// Get the Authorization header
+		authHeader := c.Get("Authorization")
+		if authHeader == "" {
+			log.Println("Missing Authorization header")
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "missing authorization header"})
+		}
+
+		// Check if the header has the Bearer prefix
+		if !strings.HasPrefix(authHeader, "Bearer ") {
+			log.Println("Invalid Authorization format")
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid authorization format"})
+		}
+
+		// Extract the token
+		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+
+		// Parse and validate the token
+		token, err := jwt.ParseWithClaims(tokenString, &models.UserClaims{}, func(token *jwt.Token) (interface{}, error) {
+			return []byte(jwtSecret), nil
+		})
+
+		if err != nil {
+			log.Printf("Token validation error: %v", err)
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid token"})
+		}
+
+		// Check if the token is valid
+		if !token.Valid {
+			log.Println("Token is invalid")
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid token"})
+		}
+
+		// Extract the claims
+		claims, ok := token.Claims.(*models.UserClaims)
+		if !ok {
+			log.Println("Failed to extract claims")
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid claims"})
+		}
+
+		// Store the claims in the context
+		c.Locals("claims", claims)
+		c.Locals("userID", claims.UserID)
+
+		return c.Next()
+	}
 }

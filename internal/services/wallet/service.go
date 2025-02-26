@@ -6,14 +6,14 @@ import (
 	"fmt"
 	"orus/internal/models"
 	"orus/internal/repositories"
-	"orus/internal/services/credit_card"
+	creditcard "orus/internal/services/credit-card"
 	"time"
 )
 
 type service struct {
 	repo        repositories.WalletRepository
 	cache       repositories.CacheRepository
-	cardService credit_card.Service
+	cardService creditcard.Service
 	config      WalletConfig
 	metrics     MetricsCollector
 }
@@ -22,7 +22,7 @@ type service struct {
 func NewService(
 	repo repositories.WalletRepository,
 	cache repositories.CacheRepository,
-	cardService credit_card.Service,
+	cardService creditcard.Service,
 	config WalletConfig,
 	metrics MetricsCollector,
 ) Service {

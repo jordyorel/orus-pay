@@ -12,12 +12,14 @@ import (
 )
 
 type AuthHandler struct {
-	authService auth.Service
+	authService   auth.Service
+	refreshSecret string
 }
 
-func NewAuthHandler(authService auth.Service) *AuthHandler {
+func NewAuthHandler(authService auth.Service, refreshSecret string) *AuthHandler {
 	return &AuthHandler{
-		authService: authService,
+		authService:   authService,
+		refreshSecret: refreshSecret,
 	}
 }
 
@@ -64,7 +66,21 @@ func (h *AuthHandler) LoginUser(c *fiber.Ctx) error {
 
 // RefreshToken handles token refresh requests
 func (h *AuthHandler) RefreshToken(c *fiber.Ctx) error {
+	// First try to get token from cookies
 	refreshToken := c.Cookies("refresh_token")
+
+	// If not in cookies, try request body
+	if refreshToken == "" {
+		var input struct {
+			RefreshToken string `json:"refresh_token"`
+		}
+		if err := c.BodyParser(&input); err != nil {
+			return utils.Unauthorized(c, "Refresh token not provided")
+		}
+		refreshToken = input.RefreshToken
+	}
+
+	// Validate refresh token
 	if refreshToken == "" {
 		return utils.Unauthorized(c, "Refresh token not provided")
 	}
