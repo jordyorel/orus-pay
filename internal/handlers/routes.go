@@ -7,17 +7,19 @@ import (
 	"orus/internal/services/auth"
 	"orus/internal/services/credit_card"
 	"orus/internal/services/merchant"
+	"orus/internal/services/payment"
 	qr "orus/internal/services/qr_code"
 	"orus/internal/services/transaction"
 	"orus/internal/services/wallet"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/redis/go-redis/v9"
+	"gorm.io/gorm"
 )
 
 var walletService wallet.Service
 
-func SetupRoutes(app *fiber.App) {
+func SetupRoutes(app *fiber.App, db *gorm.DB) {
 	// Initialize cache
 	redisClient := redis.NewClient(&redis.Options{
 		Addr: "localhost:6379",
@@ -57,8 +59,10 @@ func SetupRoutes(app *fiber.App) {
 		walletService,
 	)
 
+	paymentService := payment.NewService(walletService, transactionService, qrService)
+
 	// Initialize handlers
-	paymentHandler := NewPaymentHandler(qrService, transactionService)
+	paymentHandler := NewPaymentHandler(qrService, paymentService)
 	merchantHandler := NewMerchantHandler(
 		merchant.NewService(qrService, transactionService, walletService),
 		qrService,

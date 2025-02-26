@@ -1,14 +1,18 @@
 package handlers
 
 import (
+	"errors"
+	"fmt"
 	"orus/internal/models"
 	"orus/internal/repositories"
 	"orus/internal/services/merchant"
 	qr "orus/internal/services/qr_code"
+	"orus/internal/utils"
 
 	"orus/internal/utils/response"
 
 	"github.com/gofiber/fiber/v2"
+	"gorm.io/gorm"
 )
 
 type MerchantHandler struct {
@@ -24,26 +28,73 @@ func NewMerchantHandler(merchantSvc *merchant.Service, qrSvc qr.Service) *Mercha
 }
 
 func (h *MerchantHandler) CreateMerchant(c *fiber.Ctx) error {
-	userID := c.Locals("userID").(uint)
+	claims := c.Locals("claims").(*models.UserClaims)
 
-	var merchant models.Merchant
-	if err := c.BodyParser(&merchant); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Invalid request format",
-		})
+	var input struct {
+		UserID             uint   `json:"user_id"`
+		BusinessName       string `json:"business_name"`
+		BusinessType       string `json:"business_type"`
+		BusinessAddress    string `json:"business_address"`
+		BusinessID         string `json:"business_id"`
+		TaxID              string `json:"tax_id"`
+		Website            string `json:"website"`
+		MerchantCategory   string `json:"merchant_category"`
+		LegalEntityType    string `json:"legal_entity_type"`
+		RegistrationNumber string `json:"registration_number"`
+		YearEstablished    int    `json:"year_established"`
+		SupportEmail       string `json:"support_email"`
+		SupportPhone       string `json:"support_phone"`
 	}
 
-	merchant.UserID = userID
+	if err := c.BodyParser(&input); err != nil {
+		return utils.BadRequest(c, "Invalid request format")
+	}
+
+	// Use the authenticated user's ID if not specified
+	if input.UserID == 0 {
+		input.UserID = claims.UserID
+	}
 
 	// Create merchant profile
-	if err := h.merchantService.CreateMerchant(&merchant); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": err.Error(),
-		})
+	merchant := &models.Merchant{
+		UserID:          input.UserID,
+		BusinessName:    input.BusinessName,
+		BusinessType:    input.BusinessType,
+		BusinessAddress: input.BusinessAddress,
+		RiskScore:       50, // Default risk score
+		ComplianceLevel: "medium_risk",
+		Status:          "active",
+
+		// Default limits
+		DailyTransactionLimit:   10000,
+		MonthlyTransactionLimit: 100000,
+		MinTransactionAmount:    1,
+		MaxTransactionAmount:    5000,
+	}
+
+	// Store additional fields in metadata
+	metadata := models.NewJSON(map[string]interface{}{
+		"business_id":         input.BusinessID,
+		"tax_id":              input.TaxID,
+		"website":             input.Website,
+		"merchant_category":   input.MerchantCategory,
+		"legal_entity_type":   input.LegalEntityType,
+		"registration_number": input.RegistrationNumber,
+		"year_established":    input.YearEstablished,
+		"support_email":       input.SupportEmail,
+		"support_phone":       input.SupportPhone,
+	})
+
+	// Add metadata field to Merchant model if it doesn't exist
+	merchant.Metadata = metadata
+
+	result, err := h.merchantService.CreateMerchant(merchant)
+	if err != nil {
+		return response.Error(c, fiber.StatusBadRequest, err.Error())
 	}
 
 	return response.Success(c, "Merchant profile created successfully", fiber.Map{
-		"merchant": merchant,
+		"merchant": result,
 	})
 }
 
@@ -51,6 +102,28 @@ func (h *MerchantHandler) GetMerchantProfile(c *fiber.Ctx) error {
 	claims := c.Locals("claims").(*models.UserClaims)
 	merchant, err := repositories.GetMerchantByUserID(claims.UserID)
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			defaultMerchant := &models.Merchant{
+				UserID:                  claims.UserID,
+				BusinessName:            "My Business",
+				BusinessType:            "retail",
+				Status:                  "pending",
+				ComplianceLevel:         "pending",
+				RiskScore:               50,
+				DailyTransactionLimit:   10000,
+				MonthlyTransactionLimit: 100000,
+				MinTransactionAmount:    1,
+				MaxTransactionAmount:    5000,
+			}
+
+			result, err := h.merchantService.CreateMerchant(defaultMerchant)
+			if err != nil {
+				return response.Error(c, fiber.StatusInternalServerError, "Failed to create merchant profile")
+			}
+
+			return response.Success(c, "Default merchant profile created", result)
+		}
+
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
 			"error": "Merchant profile not found",
 		})
@@ -75,13 +148,67 @@ func (h *MerchantHandler) ProcessDirectCharge(c *fiber.Ctx) error {
 
 func (h *MerchantHandler) UpdateMerchantProfile(c *fiber.Ctx) error {
 	claims := c.Locals("claims").(*models.UserClaims)
-	var input merchant.UpdateMerchantInput
+	var input struct {
+		BusinessInfo struct {
+			Name               string `json:"name"`
+			Type               string `json:"type"`
+			RegistrationNumber string `json:"registration_number"`
+			TaxID              string `json:"tax_id"`
+		} `json:"business_info"`
+		ContactInfo struct {
+			BusinessEmail string `json:"business_email"`
+			BusinessPhone string `json:"business_phone"`
+			Website       string `json:"website"`
+		} `json:"contact_info"`
+		Address struct {
+			Street     string `json:"street"`
+			Unit       string `json:"unit"`
+			City       string `json:"city"`
+			PostalCode string `json:"postal_code"`
+			Country    string `json:"country"`
+		} `json:"address"`
+		SettlementInfo struct {
+			BankName      string `json:"bank_name"`
+			AccountNumber string `json:"account_number"`
+			AccountHolder string `json:"account_holder"`
+			Currency      string `json:"currency"`
+		} `json:"settlement_info"`
+		BusinessHours map[string]string `json:"business_hours"`
+	}
 
 	if err := c.BodyParser(&input); err != nil {
 		return response.BadRequest(c, "Invalid request body")
 	}
 
-	if err := h.merchantService.UpdateMerchantProfile(claims.UserID, input); err != nil {
+	// Get existing merchant
+	merchant, err := repositories.GetMerchantByUserID(claims.UserID)
+	if err != nil {
+		return response.Error(c, fiber.StatusNotFound, "Merchant profile not found")
+	}
+
+	// Update basic fields
+	merchant.BusinessName = input.BusinessInfo.Name
+	merchant.BusinessType = input.BusinessInfo.Type
+
+	// Create full address
+	fullAddress := fmt.Sprintf("%s, %s, %s %s, %s",
+		input.Address.Street,
+		input.Address.Unit,
+		input.Address.City,
+		input.Address.PostalCode,
+		input.Address.Country)
+	merchant.BusinessAddress = fullAddress
+
+	// Store all other fields in metadata
+	merchant.Metadata = models.NewJSON(map[string]interface{}{
+		"business_info":   input.BusinessInfo,
+		"contact_info":    input.ContactInfo,
+		"address":         input.Address,
+		"settlement_info": input.SettlementInfo,
+		"business_hours":  input.BusinessHours,
+	})
+
+	if err := repositories.UpdateMerchant(merchant); err != nil {
 		return response.Error(c, fiber.StatusInternalServerError, "Failed to update merchant profile")
 	}
 

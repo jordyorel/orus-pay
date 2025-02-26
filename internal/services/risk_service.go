@@ -2,7 +2,8 @@ package services
 
 import "orus/internal/models"
 
-const highRiskThreshold = 0.8
+// HighRiskThreshold defines the score above which a transaction is considered high risk
+const HighRiskThreshold = 0.8
 
 type RiskService struct{}
 
@@ -19,7 +20,10 @@ func (s *RiskService) AssessTransaction(tx *models.Transaction) float64 {
 		riskScore += 0.3
 	}
 
-	// Add more risk factors as needed
+	// Check if transaction is high risk
+	if riskScore > HighRiskThreshold {
+		// Log high risk transaction
+	}
 
 	return riskScore
 }

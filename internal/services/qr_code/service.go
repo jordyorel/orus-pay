@@ -2,8 +2,10 @@ package qr_code
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	domainQR "orus/internal/domain/qr"
+	appErrors "orus/internal/errors"
 	"orus/internal/models"
 	"orus/internal/repositories"
 	"orus/internal/services/transaction"
@@ -103,7 +105,7 @@ func (s *service) ProcessQRPayment(ctx context.Context, code string, amount floa
 
 	// Check expiry only if ExpiresAt is set
 	if qr.ExpiresAt != nil && qr.ExpiresAt.Before(time.Now()) {
-		return nil, ErrQRExpired
+		return nil, appErrors.ErrQRExpired
 	}
 
 	// Check scanner role
@@ -120,7 +122,19 @@ func (s *service) ProcessQRPayment(ctx context.Context, code string, amount floa
 		}
 		// For merchant scanning customer payment code:
 		// Customer (QR owner) pays, merchant receives
-		return s.processTransaction(qr.UserID, scannerID, amount, description, metadata)
+		// Create transaction
+		tx := &models.Transaction{
+			Type:        "QR_PAYMENT",
+			SenderID:    qr.UserID,
+			ReceiverID:  scannerID,
+			Amount:      amount,
+			Status:      "pending",
+			Description: description,
+			Metadata:    models.NewJSON(metadata),
+		}
+
+		// Use transaction service to process
+		return s.transactionSvc.ProcessTransaction(ctx, tx)
 	} else {
 		// Regular users can only scan receive QRs
 		if qr.Type != string(TypeReceive) {
@@ -128,57 +142,35 @@ func (s *service) ProcessQRPayment(ctx context.Context, code string, amount floa
 		}
 		// For user scanning another user/merchant receive QR:
 		// Scanner pays, QR owner receives
-		return s.processTransaction(scannerID, qr.UserID, amount, description, metadata)
+		// Create transaction
+		tx := &models.Transaction{
+			Type:        "QR_PAYMENT",
+			SenderID:    scannerID,
+			ReceiverID:  qr.UserID,
+			Amount:      amount,
+			Status:      "pending",
+			Description: description,
+			Metadata:    models.NewJSON(metadata),
+		}
+
+		// Use transaction service to process
+		return s.transactionSvc.ProcessTransaction(ctx, tx)
 	}
 }
 
-// Helper function to process the actual transaction
-func (s *service) processTransaction(payerID, receiverID uint, amount float64, description string, metadata map[string]interface{}) (*models.Transaction, error) {
-	// Remove expiry check from here since we don't have qr
-	if amount <= 0 {
-		return nil, ErrInvalidAmount
+func (s *service) ValidateQRCode(ctx context.Context, code string, amount float64) (uint, error) {
+	// Get QR code from database
+	var qrCode models.QRCode
+	err := s.db.Where("code = ? AND status = ?", code, "active").First(&qrCode).Error
+	if err != nil {
+		return 0, fmt.Errorf("invalid QR code: %w", err)
 	}
 
-	// Create transaction first
-	tx := &models.Transaction{
-		Type:        "QR_PAYMENT",
-		SenderID:    payerID,
-		ReceiverID:  receiverID,
-		Amount:      amount,
-		Status:      "pending",
-		Description: description,
-		Metadata:    models.NewJSON(metadata),
+	// Check if QR code is valid
+	if qrCode.ExpiresAt != nil && qrCode.ExpiresAt.Before(time.Now()) {
+		return 0, errors.New("QR code expired")
 	}
 
-	// Create the transaction record
-	if err := s.db.Create(tx).Error; err != nil {
-		return nil, fmt.Errorf("failed to create transaction: %w", err)
-	}
-
-	// Process the wallet updates
-	if err := s.db.Transaction(func(dtx *gorm.DB) error {
-		// Update sender's wallet (debit)
-		if err := dtx.Exec("UPDATE wallets SET balance = balance - ? WHERE user_id = ?", amount, payerID).Error; err != nil {
-			return err
-		}
-
-		// Update receiver's wallet (credit)
-		if err := dtx.Exec("UPDATE wallets SET balance = balance + ? WHERE user_id = ?", amount, receiverID).Error; err != nil {
-			// Rollback will happen automatically
-			return err
-		}
-
-		// Update transaction status
-		if err := dtx.Model(tx).Update("status", "completed").Error; err != nil {
-			return err
-		}
-
-		return nil
-	}); err != nil {
-		// If the wallet updates fail, mark transaction as failed
-		s.db.Model(tx).Update("status", "failed")
-		return nil, err
-	}
-
-	return tx, nil
+	// Return the user ID associated with the QR code
+	return qrCode.UserID, nil
 }

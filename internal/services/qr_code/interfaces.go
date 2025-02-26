@@ -26,6 +26,9 @@ type Service interface {
 	// Static QR methods - only these two
 	GetUserReceiveQR(ctx context.Context, userID uint) (*models.QRCode, error)
 	GetUserPaymentCodeQR(ctx context.Context, userID uint) (*models.QRCode, error)
+
+	// New method
+	ValidateQRCode(ctx context.Context, code string, amount float64) (uint, error)
 }
 
 // GenerateQRRequest encapsulates parameters for QR generation

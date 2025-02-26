@@ -22,6 +22,7 @@ type Merchant struct {
 	MaxTransactionAmount    float64
 	WebhookURL              string
 	MonthlyVolume           float64
+	Metadata                JSON `gorm:"type:jsonb"`
 	CreatedAt               time.Time
 	UpdatedAt               time.Time
 }

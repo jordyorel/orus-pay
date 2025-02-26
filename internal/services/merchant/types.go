@@ -10,10 +10,10 @@ type UpdateMerchantInput struct {
 }
 
 type ChargeInput struct {
-	CustomerID  uint    `json:"customer_id"`
 	Amount      float64 `json:"amount"`
 	Description string  `json:"description"`
 	PaymentType string  `json:"payment_type"`
+	PaymentCode string  `json:"payment_code"`
 }
 
 type QRPaymentInput struct {

@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 	"orus/internal/models"
+	"orus/internal/services/payment"
 	qr "orus/internal/services/qr_code"
-	transaction "orus/internal/services/transaction"
 	"orus/internal/services/wallet"
 	"orus/internal/utils"
 	"orus/internal/utils/response"
@@ -15,14 +15,14 @@ import (
 )
 
 type PaymentHandler struct {
-	qrService          qr.Service
-	transactionService transaction.Service
+	qrService      qr.Service
+	paymentService payment.Service
 }
 
-func NewPaymentHandler(qrSvc qr.Service, txSvc transaction.Service) *PaymentHandler {
+func NewPaymentHandler(qrSvc qr.Service, paymentSvc payment.Service) *PaymentHandler {
 	return &PaymentHandler{
-		qrService:          qrSvc,
-		transactionService: txSvc,
+		qrService:      qrSvc,
+		paymentService: paymentSvc,
 	}
 }
 
@@ -77,14 +77,15 @@ func (h *PaymentHandler) ProcessQRPayment(c *fiber.Ctx) error {
 func (h *PaymentHandler) SendMoney(c *fiber.Ctx) error {
 	claims := c.Locals("claims").(*models.UserClaims)
 
-	var input transaction.TransferRequest
+	var input struct {
+		ReceiverID  uint    `json:"receiver_id"`
+		Amount      float64 `json:"amount"`
+		Description string  `json:"description"`
+	}
 
 	if err := c.BodyParser(&input); err != nil {
 		return utils.BadRequest(c, "Invalid request format")
 	}
-
-	// Set sender ID before validation
-	input.SenderID = claims.UserID
 
 	// Create context with user role
 	ctx := context.WithValue(c.Context(), wallet.UserRoleContextKey, claims.Role)
@@ -93,15 +94,13 @@ func (h *PaymentHandler) SendMoney(c *fiber.Ctx) error {
 	fmt.Printf("SendMoney - User Role: %s, From: %d, To: %d, Amount: %.2f\n",
 		claims.Role, claims.UserID, input.ReceiverID, input.Amount)
 
-	v := validation.New()
-	v.Transfer(&input)
-	if !v.Valid() {
-		for _, msg := range v.Errors {
-			return utils.BadRequest(c, fmt.Sprintf("Validation error: %s", msg))
-		}
-	}
-
-	tx, err := h.transactionService.ProcessP2PTransfer(ctx, input)
+	tx, err := h.paymentService.SendMoney(
+		ctx,
+		claims.UserID,
+		input.ReceiverID,
+		input.Amount,
+		input.Description,
+	)
 	if err != nil {
 		return response.Error(c, fiber.StatusBadRequest, err.Error())
 	}
@@ -130,18 +129,32 @@ func (h *PaymentHandler) ProcessPayment(c *fiber.Ctx) error {
 		return response.Unauthorized(c)
 	}
 
-	// Create transaction request
-	tx := &models.Transaction{
-		Type:        req.PaymentType,
-		SenderID:    claims.UserID,
-		ReceiverID:  req.RecipientID,
-		Amount:      req.Amount,
-		Description: req.Description,
-		Status:      "pending",
+	// Create context with user role
+	ctx := context.WithValue(c.Context(), wallet.UserRoleContextKey, claims.Role)
+
+	// Process payment based on type
+	var result *models.Transaction
+	var err error
+
+	switch req.PaymentType {
+	case "merchant_payment":
+		result, err = h.paymentService.ProcessMerchantPayment(
+			ctx,
+			claims.UserID,
+			req.RecipientID,
+			req.Amount,
+			req.Description,
+		)
+	default:
+		result, err = h.paymentService.SendMoney(
+			ctx,
+			claims.UserID,
+			req.RecipientID,
+			req.Amount,
+			req.Description,
+		)
 	}
 
-	// Process transaction
-	result, err := h.transactionService.ProcessTransaction(c.Context(), tx)
 	if err != nil {
 		return response.ServerError(c, err.Error())
 	}

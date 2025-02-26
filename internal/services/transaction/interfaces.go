@@ -23,3 +23,10 @@ type TransferRequest struct {
 	Description string                 `json:"description"`
 	Metadata    map[string]interface{} `json:"metadata,omitempty"`
 }
+
+type Service interface {
+	Process(ctx context.Context, tx *models.Transaction) error
+	Rollback(ctx context.Context, tx *models.Transaction) error
+	CreateTransaction(ctx context.Context, tx *models.Transaction) (*models.Transaction, error)
+	ProcessTransaction(ctx context.Context, tx *models.Transaction) (*models.Transaction, error)
+}

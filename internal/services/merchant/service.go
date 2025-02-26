@@ -11,7 +11,6 @@ import (
 	"orus/internal/services/qr_code"
 	"orus/internal/services/transaction"
 	"orus/internal/services/wallet"
-	"time"
 
 	"gorm.io/gorm"
 )
@@ -36,16 +35,16 @@ func NewService(
 	}
 }
 
-func (s *Service) CreateMerchant(merchant *models.Merchant) error {
+func (s *Service) CreateMerchant(merchant *models.Merchant) (*models.Merchant, error) {
 	log.Printf("Creating new merchant for user ID: %d", merchant.UserID)
 
 	// Check for existing merchant
 	existingMerchant, err := repositories.GetMerchantByUserID(merchant.UserID)
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		return err
+		return nil, err
 	}
 	if existingMerchant != nil {
-		return errors.New("merchant profile already exists")
+		return nil, errors.New("merchant profile already exists")
 	}
 
 	// Set defaults
@@ -58,40 +57,49 @@ func (s *Service) CreateMerchant(merchant *models.Merchant) error {
 	merchant.Status = "active"
 
 	// Create merchant profile without QR codes
-	return repositories.CreateMerchant(merchant)
+	if err := repositories.DB.Create(merchant).Error; err != nil {
+		return nil, err
+	}
+	return merchant, nil
 }
 
 func (s *Service) ProcessDirectCharge(merchantID uint, input ChargeInput) (*models.Transaction, error) {
-	// Validate customer wallet exists first
-	if _, err := s.walletService.GetWallet(context.Background(), input.CustomerID); err != nil {
+	// Validate the payment code
+	var qrCode models.QRCode
+	if err := repositories.DB.Where("code = ? AND status = ?", input.PaymentCode, "active").First(&qrCode).Error; err != nil {
+		return nil, fmt.Errorf("invalid payment code: %w", err)
+	}
+
+	// Get customer ID from QR code
+	customerID := qrCode.UserID
+
+	// Verify customer wallet exists
+	_, err := s.walletService.GetWallet(context.Background(), customerID)
+	if err != nil {
 		return nil, fmt.Errorf("customer wallet not found: %w", err)
 	}
 
-	// Validate merchant exists
-	merchant, err := repositories.GetMerchantByUserID(merchantID)
-	if err != nil {
-		return nil, fmt.Errorf("merchant not found: %w", err)
+	// Check if customer has sufficient balance
+	if err := s.walletService.ValidateBalance(context.Background(), customerID, input.Amount); err != nil {
+		return nil, fmt.Errorf("insufficient balance: %w", err)
 	}
 
-	// Validate amount
-	if input.Amount <= 0 || input.Amount > merchant.MaxTransactionAmount {
-		return nil, ErrInvalidAmount
-	}
-
+	// Create transaction
 	tx := &models.Transaction{
-		TransactionID: fmt.Sprintf("TX-%d-%d", time.Now().Unix(), input.CustomerID),
-		Type:          models.TransactionTypeMerchantDirect,
-		SenderID:      input.CustomerID,
-		ReceiverID:    merchantID,
-		Amount:        input.Amount,
-		Description:   input.Description,
-		PaymentType:   input.PaymentType,
-		MerchantID:    &merchantID,
-		Status:        "pending",
-		Currency:      "USD",
+		Type:        models.TransactionTypeMerchantScan,
+		SenderID:    customerID,
+		ReceiverID:  merchantID,
+		Amount:      input.Amount,
+		Description: input.Description,
+		Status:      "pending",
+		Metadata: models.NewJSON(map[string]interface{}{
+			"payment_code": input.PaymentCode,
+			"merchant_id":  merchantID,
+		}),
 	}
 
-	return s.processTransaction(tx)
+	// Process the transaction
+	return s.transactionService.ProcessTransaction(context.Background(), tx)
 }
 
 // Move all merchant service methods here

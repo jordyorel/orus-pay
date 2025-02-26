@@ -92,7 +92,7 @@ func main() {
 	}))
 
 	// Routes
-	handlers.SetupRoutes(app)
+	handlers.SetupRoutes(app, repositories.DB)
 
 	// Start server
 	log.Fatal(app.Listen(":" + config.GetEnv("PORT", "3000")))
