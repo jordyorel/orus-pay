@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"orus/internal/models"
 	"strconv"
 	"time"
 
@@ -68,4 +69,32 @@ func (r *RedisCacheRepository) DeleteMany(ctx context.Context, pattern string) e
 		}
 	}
 	return iter.Err()
+}
+
+func (r *RedisCacheRepository) GetWallet(ctx context.Context, userID uint) (*models.Wallet, error) {
+	key := fmt.Sprintf("wallet:%d", userID)
+	data, err := r.client.Get(ctx, key).Bytes()
+	if err != nil {
+		return nil, err
+	}
+
+	var wallet models.Wallet
+	if err := json.Unmarshal(data, &wallet); err != nil {
+		return nil, err
+	}
+	return &wallet, nil
+}
+
+func (r *RedisCacheRepository) SetWallet(ctx context.Context, userID uint, wallet *models.Wallet) error {
+	key := fmt.Sprintf("wallet:%d", userID)
+	data, err := json.Marshal(wallet)
+	if err != nil {
+		return err
+	}
+	return r.client.Set(ctx, key, data, DefaultExpiration).Err()
+}
+
+func (r *RedisCacheRepository) DeleteWallet(ctx context.Context, userID uint) error {
+	key := fmt.Sprintf("wallet:%d", userID)
+	return r.client.Del(ctx, key).Err()
 }

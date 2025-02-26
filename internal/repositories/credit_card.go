@@ -4,16 +4,17 @@ import (
 	"orus/internal/models"
 )
 
-func CreateCreditCard(card *models.CreateCreditCard) error {
-	return DB.Create(card).Error
+func CreateCreditCard(card *models.CreditCard) error {
+	result := DB.Table("credit_cards").Create(card)
+	return result.Error
 }
 
-func GetCreditCardsPaginated(limit, offset int) ([]models.CreateCreditCard, int64, error) {
-	var creditCards []models.CreateCreditCard
+func GetCreditCardsPaginated(limit, offset int) ([]models.CreditCard, int64, error) {
+	var creditCards []models.CreditCard
 	var total int64
 
 	// Fetch credit cards with pagination
-	result := DB.Model(&models.CreateCreditCard{}).Count(&total).Limit(limit).Offset(offset).Find(&creditCards)
+	result := DB.Model(&models.CreditCard{}).Count(&total).Limit(limit).Offset(offset).Find(&creditCards)
 	if result.Error != nil {
 		return nil, 0, result.Error
 	}
@@ -21,18 +22,18 @@ func GetCreditCardsPaginated(limit, offset int) ([]models.CreateCreditCard, int6
 	return creditCards, total, nil
 }
 
-func GetCreditCardByID(cardID uint) (*models.CreateCreditCard, error) {
-	var card models.CreateCreditCard
+func GetCreditCardByID(cardID uint) (*models.CreditCard, error) {
+	var card models.CreditCard
 	err := DB.First(&card, cardID).Error
 	return &card, err
 }
 
-func GetCreditCardsByUserID(userID uint) ([]models.CreateCreditCard, error) {
-	var cards []models.CreateCreditCard
+func GetCreditCardsByUserID(userID uint) ([]models.CreditCard, error) {
+	var cards []models.CreditCard
 	err := DB.Where("user_id = ?", userID).Find(&cards).Error
 	return cards, err
 }
 
 func DeleteCreditCard(cardID uint) error {
-	return DB.Delete(&models.CreateCreditCard{}, cardID).Error
+	return DB.Delete(&models.CreditCard{}, cardID).Error
 }

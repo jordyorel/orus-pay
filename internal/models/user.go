@@ -26,3 +26,12 @@ type User struct {
 	TokenVersion          int    `gorm:"default:1"`
 	MerchantProfileStatus string `gorm:"default:'not_applicable'"`
 }
+
+// CreateUserInput represents the data needed to create a new user
+type CreateUserInput struct {
+	Name     string `json:"name"`
+	Email    string `json:"email"`
+	Phone    string `json:"phone"`
+	Password string `json:"password"`
+	Role     string `json:"role"`
+}

@@ -2,36 +2,65 @@ package wallet
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"log"
 	"orus/internal/models"
+	"orus/internal/repositories"
+	"orus/internal/services/credit_card"
 	"time"
-
-	"gorm.io/gorm"
 )
 
 type service struct {
-	db      DB
-	cache   CacheOperator
-	config  WalletConfig
-	metrics MetricsCollector
+	repo        repositories.WalletRepository
+	cache       repositories.CacheRepository
+	cardService credit_card.Service
+	config      WalletConfig
+	metrics     MetricsCollector
 }
 
 // NewService creates a new wallet service
-func NewService(db DB, cache CacheOperator, config WalletConfig, metrics MetricsCollector) Service {
-	if db == nil {
-		panic("db is required")
+func NewService(
+	repo repositories.WalletRepository,
+	cache repositories.CacheRepository,
+	cardService credit_card.Service,
+	config WalletConfig,
+	metrics MetricsCollector,
+) Service {
+	if repo == nil {
+		panic("repo is required")
 	}
 	if cache == nil {
 		panic("cache is required")
 	}
+	if cardService == nil {
+		panic("card service is required")
+	}
 
 	// Set default configuration values if not provided
 	if config.DefaultCurrency == "" {
-		config.DefaultCurrency = DefaultCurrency
+		config.DefaultCurrency = "USD"
 	}
-	if config.MaxDailyLimit == 0 {
-		config.MaxDailyLimit = DefaultMaxDailyLimit
+	if config.WithdrawalFees == nil {
+		config.WithdrawalFees = map[string]float64{
+			"user":     0.001, // 1% for regular users
+			"merchant": 0.075, // 0.75% for merchants (competitive rate)
+		}
+	}
+	if config.Limits == nil {
+		config.Limits = map[string]TransactionLimits{
+			"user": {
+				MaxTransactionAmount:  50000, // $5,000 per transaction
+				DailyTransactionLimit: 50000, // $10,000 per day
+				MonthlyLimit:          50000, // $50,000 per month
+				MinTransactionAmount:  1,     // $1 minimum
+			},
+			"merchant": {
+				MaxTransactionAmount:  500000,  // $50,000 per transaction
+				DailyTransactionLimit: 500000,  // $100,000 per day
+				MonthlyLimit:          1000000, // $1,000,000 per month
+				MinTransactionAmount:  1,       // $1 minimum
+			},
+		}
 	}
 	if config.ProcessingTimeout == 0 {
 		config.ProcessingTimeout = DefaultTimeout
@@ -39,127 +68,163 @@ func NewService(db DB, cache CacheOperator, config WalletConfig, metrics Metrics
 
 	// Metrics is optional, create no-op collector if nil
 	if metrics == nil {
-		metrics = &noopMetricsCollector{}
+		metrics = &NoopMetricsCollector{}
 	}
 
 	return &service{
-		db:      db,
-		cache:   cache,
-		config:  config,
-		metrics: metrics,
+		repo:        repo,
+		cache:       cache,
+		cardService: cardService,
+		config:      config,
+		metrics:     metrics,
 	}
 }
 
 func (s *service) GetWallet(ctx context.Context, userID uint) (*models.Wallet, error) {
-	var wallet models.Wallet
-	err := s.db.WithContext(ctx).
-		Where("user_id = ?", userID).
-		Order("id").
-		First(&wallet).Error
-
-	if err == gorm.ErrRecordNotFound {
-		// Silently create new wallet - this is expected for new users
-		wallet = models.Wallet{
-			UserID:   userID,
-			Balance:  0,
-			Currency: "USD",
-			Status:   "active",
-		}
-		if err := s.db.WithContext(ctx).Create(&wallet).Error; err != nil {
-			return nil, fmt.Errorf("failed to create wallet: %w", err)
-		}
-		return &wallet, nil
+	// Try cache first
+	if wallet, err := s.cache.GetWallet(ctx, userID); err == nil {
+		return wallet, nil
 	}
 
+	// Get from database
+	wallet, err := s.repo.GetByUserID(userID)
 	if err != nil {
-		log.Printf("Error getting wallet: %v", err) // Only log unexpected errors
-		return nil, err
+		if err == repositories.ErrWalletNotFound {
+			return nil, ErrWalletNotFound
+		}
+		return nil, fmt.Errorf("failed to get wallet: %w", err)
 	}
 
-	return &wallet, nil
+	// Update cache
+	s.cache.SetWallet(ctx, userID, wallet)
+	return wallet, nil
 }
 
-func (s *service) Credit(ctx context.Context, userID uint, amount float64) error {
-	start := time.Now()
-	defer func() {
-		s.metrics.RecordOperationDuration("credit", time.Since(start))
-	}()
+func (s *service) CreateWallet(ctx context.Context, userID uint, currency string) (*models.Wallet, error) {
+	wallet := &models.Wallet{
+		UserID:   userID,
+		Balance:  0,
+		Status:   "active",
+		Currency: currency,
+	}
 
-	if amount <= 0 {
-		s.metrics.RecordError("credit", "invalid_amount")
+	if err := s.repo.Create(wallet); err != nil {
+		return nil, fmt.Errorf("failed to create wallet: %w", err)
+	}
+
+	// Update cache
+	s.cache.SetWallet(ctx, userID, wallet)
+	return wallet, nil
+}
+
+func (s *service) Credit(ctx context.Context, walletID uint, amount float64) error {
+	// Get user role from context with proper type assertion
+	roleVal := ctx.Value(UserRoleContextKey)
+	role, ok := roleVal.(string)
+	if !ok || role == "" {
+		role = "user" // Default to user limits
+	}
+
+	limits := s.config.Limits[role]
+	if amount <= 0 || amount < limits.MinTransactionAmount {
 		return ErrInvalidAmount
 	}
 
-	return s.db.Transaction(func(tx *gorm.DB) error {
-		var wallet models.Wallet
-		if err := tx.WithContext(ctx).Set("gorm:for_update", true).
-			Where("user_id = ?", userID).First(&wallet).Error; err != nil {
-			s.metrics.RecordError("credit", "wallet_not_found")
-			return fmt.Errorf("failed to get wallet: %w", err)
-		}
+	if amount > limits.MaxTransactionAmount {
+		return fmt.Errorf("amount exceeds maximum limit of %v", limits.MaxTransactionAmount)
+	}
 
-		oldBalance := wallet.Balance
+	wallet, err := s.repo.GetByID(walletID)
+	if err != nil {
+		return fmt.Errorf("failed to get wallet: %w", err)
+	}
+
+	if wallet.Status != "active" {
+		return ErrWalletLocked
+	}
+
+	// Perform the credit operation in a transaction
+	err = s.repo.ExecuteInTransaction(func(tx repositories.WalletRepository) error {
 		wallet.Balance += amount
-		wallet.UpdatedAt = time.Now()
-
-		if err := tx.Save(&wallet).Error; err != nil {
-			s.metrics.RecordError("credit", "save_failed")
-			return fmt.Errorf("failed to update wallet: %w", err)
+		if err := tx.Update(wallet); err != nil {
+			return err
 		}
-
-		// Record metrics
-		s.metrics.RecordBalanceChange(userID, oldBalance, wallet.Balance)
-		s.metrics.RecordTransactionVolume(amount)
-		s.metrics.RecordDailyVolume(userID, amount)
-		s.metrics.RecordOperationResult("credit", "success")
 
 		// Record the transaction
-		if err := s.recordTransaction(tx, userID, amount, "credit", fmt.Sprintf("%s transaction of %.2f", "credit", amount)); err != nil {
-			s.metrics.RecordError("credit", "record_transaction_failed")
-			return fmt.Errorf("failed to record transaction: %w", err)
+		txn := &models.Transaction{
+			SenderID:    walletID,
+			Type:        "credit",
+			Amount:      amount,
+			Description: "Wallet credit",
+			Status:      "completed",
 		}
-
-		// Invalidate all related caches
-		s.invalidateWalletCaches(ctx, userID)
-
-		return nil
+		return tx.CreateTransaction(txn)
 	})
+
+	if err != nil {
+		s.metrics.RecordError("credit", err.Error())
+		return ErrTransactionFailed
+	}
+
+	// Invalidate cache
+	s.cache.DeleteWallet(ctx, wallet.UserID)
+
+	// Record metrics
+	s.metrics.RecordTransaction("credit", amount)
+
+	return nil
 }
 
-func (s *service) Debit(ctx context.Context, userID uint, amount float64) error {
+func (s *service) Debit(ctx context.Context, walletID uint, amount float64) error {
 	if amount <= 0 {
 		return ErrInvalidAmount
 	}
 
-	return s.db.Transaction(func(tx *gorm.DB) error {
-		var wallet models.Wallet
-		if err := tx.WithContext(ctx).Set("gorm:for_update", true).
-			Where("user_id = ?", userID).First(&wallet).Error; err != nil {
-			return fmt.Errorf("failed to get wallet: %w", err)
-		}
+	wallet, err := s.repo.GetByID(walletID)
+	if err != nil {
+		return fmt.Errorf("failed to get wallet: %w", err)
+	}
 
-		if wallet.Balance < amount {
-			return ErrInsufficientBalance
-		}
+	if wallet.Balance < amount {
+		return ErrInsufficientBalance
+	}
 
+	// Perform the debit operation in a transaction
+	err = s.repo.ExecuteInTransaction(func(tx repositories.WalletRepository) error {
 		wallet.Balance -= amount
-		wallet.UpdatedAt = time.Now()
-
-		if err := tx.Save(&wallet).Error; err != nil {
-			return fmt.Errorf("failed to update wallet: %w", err)
+		if err := tx.Update(wallet); err != nil {
+			return err
 		}
 
-		// Invalidate cache
-		s.cache.InvalidateWallet(ctx, userID)
-
-		return nil
+		// Record the transaction
+		txn := &models.Transaction{
+			SenderID:    walletID,
+			Type:        "debit",
+			Amount:      amount,
+			Description: "Wallet debit",
+			Status:      "completed",
+		}
+		return tx.CreateTransaction(txn)
 	})
+
+	if err != nil {
+		s.metrics.RecordError("debit", err.Error())
+		return ErrTransactionFailed
+	}
+
+	// Invalidate cache
+	s.cache.DeleteWallet(ctx, wallet.UserID)
+
+	// Record metrics
+	s.metrics.RecordTransaction("debit", amount)
+
+	return nil
 }
 
-func (s *service) GetBalance(ctx context.Context, userID uint) (float64, error) {
-	wallet, err := s.GetWallet(ctx, userID)
+func (s *service) GetBalance(ctx context.Context, walletID uint) (float64, error) {
+	wallet, err := s.repo.GetByID(walletID)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("failed to get wallet: %w", err)
 	}
 	return wallet.Balance, nil
 }
@@ -181,31 +246,6 @@ func (s *service) ValidateBalance(ctx context.Context, userID uint, amount float
 	return nil
 }
 
-func (s *service) CreateWallet(ctx context.Context, userID uint, currency string) (*models.Wallet, error) {
-	// Validate currency
-	if currency == "" {
-		currency = s.config.DefaultCurrency
-	}
-
-	// Check if wallet already exists
-	existing, err := s.GetWallet(ctx, userID)
-	if err == nil && existing != nil {
-		return nil, fmt.Errorf("wallet already exists for user %d", userID)
-	}
-
-	wallet := &models.Wallet{
-		UserID:   userID,
-		Balance:  0,
-		Currency: currency,
-	}
-
-	if err := s.db.WithContext(ctx).Create(wallet).Error; err != nil {
-		return nil, fmt.Errorf("failed to create wallet: %w", err)
-	}
-
-	return wallet, nil
-}
-
 func (s *service) UpdateWallet(ctx context.Context, wallet *models.Wallet) error {
 	if wallet == nil {
 		return fmt.Errorf("wallet cannot be nil")
@@ -213,12 +253,12 @@ func (s *service) UpdateWallet(ctx context.Context, wallet *models.Wallet) error
 
 	wallet.UpdatedAt = time.Now()
 
-	if err := s.db.WithContext(ctx).Save(wallet).Error; err != nil {
+	if err := s.repo.Update(wallet); err != nil {
 		return fmt.Errorf("failed to update wallet: %w", err)
 	}
 
 	// Invalidate cache
-	s.cache.InvalidateWallet(ctx, wallet.UserID)
+	s.cache.DeleteWallet(ctx, wallet.UserID)
 
 	return nil
 }
@@ -234,7 +274,7 @@ func (s *service) ProcessBatchTransfers(ctx context.Context, transfers []Transfe
 	}
 	results := make([]transferResult, 0)
 
-	err := s.db.Transaction(func(tx *gorm.DB) error {
+	err := s.repo.ExecuteInTransaction(func(tx repositories.WalletRepository) error {
 		for _, transfer := range transfers {
 			// Validate transfer
 			if err := s.validateTransfer(ctx, transfer); err != nil {
@@ -276,7 +316,7 @@ func (s *service) ProcessBatchTransfers(ctx context.Context, transfers []Transfe
 		// Log detailed results for debugging
 		for _, result := range results {
 			if result.Error != nil {
-				s.metrics.RecordError("batch_transfer", "failed")
+				s.metrics.RecordError("batch_transfer", result.Error.Error())
 				fmt.Printf("Transfer from %d to %d failed: %v\n",
 					result.Transfer.FromWalletID,
 					result.Transfer.ToWalletID,
@@ -291,16 +331,6 @@ func (s *service) ProcessBatchTransfers(ctx context.Context, transfers []Transfe
 
 // Helper methods
 
-func (s *service) validateWalletStatus(wallet *models.Wallet) error {
-	if wallet == nil {
-		return fmt.Errorf("wallet is nil")
-	}
-
-	// For now, just check if wallet exists
-	// TODO: Add status field to wallet model if needed
-	return nil
-}
-
 func (s *service) checkDailyLimit(ctx context.Context, userID uint, amount float64) error {
 	// Get today's start and end time in UTC
 	now := time.Now().UTC()
@@ -308,18 +338,12 @@ func (s *service) checkDailyLimit(ctx context.Context, userID uint, amount float
 	endOfDay := startOfDay.Add(24 * time.Hour)
 
 	var dailyTotal float64
-	err := s.db.WithContext(ctx).
-		Table("wallet_transactions").
-		Where("wallet_id = ? AND created_at BETWEEN ? AND ? AND type = ?",
-			userID, startOfDay, endOfDay, "debit").
-		Select("COALESCE(SUM(amount), 0)").
-		Scan(&dailyTotal).Error
-
+	err := s.repo.GetDailyTransactionTotal(ctx, userID, startOfDay, endOfDay, "debit", &dailyTotal)
 	if err != nil {
 		return fmt.Errorf("failed to check daily limit: %w", err)
 	}
 
-	if dailyTotal+amount > s.config.MaxDailyLimit {
+	if dailyTotal+amount > s.config.Limits["user"].DailyTransactionLimit {
 		return ErrDailyLimitExceeded
 	}
 
@@ -333,18 +357,12 @@ func (s *service) checkMonthlyLimit(ctx context.Context, userID uint, amount flo
 	endOfMonth := startOfMonth.AddDate(0, 1, 0)
 
 	var monthlyTotal float64
-	err := s.db.WithContext(ctx).
-		Table("wallet_transactions").
-		Where("wallet_id = ? AND created_at BETWEEN ? AND ? AND type = ?",
-			userID, startOfMonth, endOfMonth, "debit").
-		Select("COALESCE(SUM(amount), 0)").
-		Scan(&monthlyTotal).Error
-
+	err := s.repo.GetMonthlyTransactionTotal(ctx, userID, startOfMonth, endOfMonth, "debit", &monthlyTotal)
 	if err != nil {
 		return fmt.Errorf("failed to check monthly limit: %w", err)
 	}
 
-	if monthlyTotal+amount > s.config.MaxMonthlyLimit {
+	if monthlyTotal+amount > s.config.Limits["user"].MaxTransactionAmount {
 		return ErrMonthlyLimitExceeded
 	}
 
@@ -356,7 +374,7 @@ func (s *service) GetTransactionHistory(ctx context.Context, walletID uint, limi
 
 	// Try cache first for common queries
 	if offset == 0 && (limit == 10 || limit == 20) {
-		if cached, err := s.cache.Get(cacheKey); err == nil {
+		if cached, err := s.cache.Get(ctx, cacheKey); err == nil {
 			if history, ok := cached.([]TransactionHistory); ok {
 				return history, nil
 			}
@@ -364,21 +382,14 @@ func (s *service) GetTransactionHistory(ctx context.Context, walletID uint, limi
 	}
 
 	var history []TransactionHistory
-	err := s.db.WithContext(ctx).
-		Table("wallet_transactions").
-		Where("wallet_id = ?", walletID).
-		Order("created_at DESC").
-		Limit(limit).
-		Offset(offset).
-		Find(&history).Error
-
+	err := s.repo.GetTransactionHistory(ctx, walletID, limit, offset, &history)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get transaction history: %w", err)
 	}
 
 	// Cache the result for common queries
 	if offset == 0 && (limit == 10 || limit == 20) {
-		if err := s.cache.Set(cacheKey, history, CacheDuration); err != nil {
+		if err := s.cache.Set(ctx, cacheKey, history, CacheDuration); err != nil {
 			// Log error but don't fail the request
 			fmt.Printf("Failed to cache transaction history: %v\n", err)
 		}
@@ -387,7 +398,7 @@ func (s *service) GetTransactionHistory(ctx context.Context, walletID uint, limi
 	return history, nil
 }
 
-func (s *service) recordTransaction(tx *gorm.DB, walletID uint, amount float64, txType string, description string) error {
+func (s *service) recordTransaction(tx repositories.WalletRepository, walletID uint, amount float64, txType string, description string) error {
 	transaction := &models.Transaction{
 		Type:        txType,
 		Amount:      amount,
@@ -396,12 +407,12 @@ func (s *service) recordTransaction(tx *gorm.DB, walletID uint, amount float64, 
 		SenderID:    walletID,
 		ReceiverID:  walletID,
 	}
-	return tx.Create(transaction).Error
+	return tx.CreateTransaction(transaction)
 }
 
 // Add new cache invalidation helper
 func (s *service) invalidateWalletCaches(ctx context.Context, userID uint) {
-	s.cache.InvalidateWallet(ctx, userID)
+	s.cache.DeleteWallet(ctx, userID)
 
 	keys := []string{
 		fmt.Sprintf("%s:balance:%d", WalletCachePrefix, userID),
@@ -409,7 +420,7 @@ func (s *service) invalidateWalletCaches(ctx context.Context, userID uint) {
 	}
 
 	for _, key := range keys {
-		if err := s.cache.Delete(key); err != nil {
+		if err := s.cache.Delete(ctx, key); err != nil {
 			fmt.Printf("Failed to invalidate cache key %s: %v\n", key, err)
 		}
 	}
@@ -417,37 +428,43 @@ func (s *service) invalidateWalletCaches(ctx context.Context, userID uint) {
 
 // Add helper method for transfer validation
 func (s *service) validateTransfer(ctx context.Context, transfer TransferRequest) error {
-	if transfer.Amount <= 0 {
-		return ErrInvalidAmount
+	// Get user role from context
+	roleVal := ctx.Value(UserRoleContextKey)
+	role, ok := roleVal.(string)
+	if !ok || role == "" {
+		role = "user" // Default to user limits
+	}
+
+	// Check transaction limits
+	limits := s.config.Limits[role]
+	if transfer.Amount > limits.MaxTransactionAmount {
+		return fmt.Errorf("amount exceeds maximum limit of %v", limits.MaxTransactionAmount)
 	}
 
 	if transfer.FromWalletID == 0 || transfer.ToWalletID == 0 {
 		return fmt.Errorf("%w: invalid wallet IDs", ErrInvalidOperation)
 	}
 
-	// Get and validate source wallet
-	sourceWallet, err := s.GetWallet(ctx, transfer.FromWalletID)
+	// Just check if wallets exist
+	_, err := s.repo.GetByID(transfer.FromWalletID)
 	if err != nil {
-		return err
-	}
-	if err := s.validateWalletStatus(sourceWallet); err != nil {
-		return err
+		return fmt.Errorf("source wallet not found: %w", err)
 	}
 
-	// Get and validate destination wallet
-	destWallet, err := s.GetWallet(ctx, transfer.ToWalletID)
+	_, err = s.repo.GetByID(transfer.ToWalletID)
 	if err != nil {
-		return err
+		return fmt.Errorf("destination wallet not found: %w", err)
 	}
-	if err := s.validateWalletStatus(destWallet); err != nil {
-		return err
+
+	if transfer.FromWalletID == transfer.ToWalletID {
+		return errors.New("cannot transfer to self")
 	}
 
 	return nil
 }
 
 // Add helper method for processing individual transfers
-func (s *service) processTransfer(ctx context.Context, tx *gorm.DB, transfer TransferRequest) error {
+func (s *service) processTransfer(ctx context.Context, tx repositories.WalletRepository, transfer TransferRequest) error {
 	// Debit from source wallet
 	if err := s.Debit(ctx, transfer.FromWalletID, transfer.Amount); err != nil {
 		return fmt.Errorf("failed to debit from wallet %d: %w", transfer.FromWalletID, err)
@@ -456,17 +473,17 @@ func (s *service) processTransfer(ctx context.Context, tx *gorm.DB, transfer Tra
 	// Credit to destination wallet
 	if err := s.Credit(ctx, transfer.ToWalletID, transfer.Amount); err != nil {
 		// Rollback the debit if credit fails
-		if rbErr := s.Credit(ctx, transfer.FromWalletID, transfer.Amount); rbErr != nil {
-			return fmt.Errorf("critical error: credit failed and rollback failed: %v, %v", err, rbErr)
+		if rbErr := s.Debit(ctx, transfer.FromWalletID, transfer.Amount); rbErr != nil {
+			return fmt.Errorf("critical error: debit failed and rollback failed: %v, %v", err, rbErr)
 		}
 		return fmt.Errorf("failed to credit to wallet %d: %w", transfer.ToWalletID, err)
 	}
 
 	// Record the transfer
-	if err := s.recordTransaction(tx, transfer.FromWalletID, transfer.Amount, "debit", fmt.Sprintf("%s transaction of %.2f", "debit", transfer.Amount)); err != nil {
+	if err := s.recordTransaction(tx, transfer.FromWalletID, transfer.Amount, "debit", transfer.Description); err != nil {
 		return err
 	}
-	if err := s.recordTransaction(tx, transfer.ToWalletID, transfer.Amount, "credit", fmt.Sprintf("%s transaction of %.2f", "credit", transfer.Amount)); err != nil {
+	if err := s.recordTransaction(tx, transfer.ToWalletID, transfer.Amount, "credit", transfer.Description); err != nil {
 		return err
 	}
 
@@ -478,7 +495,7 @@ func (s *service) Process(ctx context.Context, tx *models.Transaction) error {
 	if tx.Type == "debit" {
 		return s.Debit(ctx, tx.SenderID, tx.Amount)
 	}
-	return s.Credit(ctx, tx.ReceiverID, tx.Amount)
+	return s.Credit(ctx, tx.SenderID, tx.Amount)
 }
 
 // Rollback implements TransactionProcessor interface
@@ -487,17 +504,263 @@ func (s *service) Rollback(ctx context.Context, tx *models.Transaction) error {
 	if tx.Type == "debit" {
 		return s.Credit(ctx, tx.SenderID, tx.Amount)
 	}
-	return s.Debit(ctx, tx.ReceiverID, tx.Amount)
+	return s.Debit(ctx, tx.SenderID, tx.Amount)
 }
 
-// Add no-op metrics collector
-type noopMetricsCollector struct{}
+func (s *service) Transfer(ctx context.Context, fromUserID, toUserID uint, amount float64, description string) error {
+	// Debug logs
+	// fmt.Printf("Transfer request - From User: %d, To User: %d, Amount: %.2f\n", fromUserID, toUserID, amount)
 
-func (n *noopMetricsCollector) RecordOperationDuration(string, time.Duration) {}
-func (n *noopMetricsCollector) RecordOperationResult(string, string)          {}
-func (n *noopMetricsCollector) RecordCacheHit(string)                         {}
-func (n *noopMetricsCollector) RecordCacheMiss(string)                        {}
-func (n *noopMetricsCollector) RecordBalanceChange(uint, float64, float64)    {}
-func (n *noopMetricsCollector) RecordError(string, string)                    {}
-func (n *noopMetricsCollector) RecordTransactionVolume(float64)               {}
-func (n *noopMetricsCollector) RecordDailyVolume(uint, float64)               {}
+	if amount <= 0 {
+		return ErrInvalidAmount
+	}
+
+	if fromUserID == toUserID {
+		fmt.Printf("Transfer blocked - Same user IDs: %d\n", fromUserID)
+		return errors.New("cannot transfer to self")
+	}
+
+	// Get source wallet
+	sourceWallet, err := s.repo.GetByUserID(fromUserID)
+	if err != nil {
+		fmt.Printf("Source wallet error - User ID: %d, Error: %v\n", fromUserID, err)
+		return fmt.Errorf("source wallet not found: %w", err)
+	}
+
+	// Get destination wallet
+	destWallet, err := s.repo.GetByUserID(toUserID)
+	if err != nil {
+		fmt.Printf("Destination wallet error - User ID: %d, Error: %v\n", toUserID, err)
+		return fmt.Errorf("destination wallet not found: %w", err)
+	}
+
+	fmt.Printf("Wallets found - Source User: %d (Balance: %.2f), Dest User: %d (Balance: %.2f)\n",
+		sourceWallet.UserID, sourceWallet.Balance, destWallet.UserID, destWallet.Balance)
+
+	if sourceWallet.Status != "active" {
+		return ErrWalletLocked
+	}
+	if sourceWallet.Balance < amount {
+		return ErrInsufficientBalance
+	}
+
+	// Execute transfer in a transaction
+	err = s.repo.ExecuteInTransaction(func(tx repositories.WalletRepository) error {
+		// Debit source wallet
+		sourceWallet.Balance -= amount
+		if err := tx.Update(sourceWallet); err != nil {
+			return err
+		}
+
+		// Credit destination wallet
+		destWallet.Balance += amount
+		if err := tx.Update(destWallet); err != nil {
+			return err
+		}
+
+		// Record transaction
+		transferTx := &models.Transaction{
+			SenderID:    fromUserID,
+			ReceiverID:  toUserID,
+			Amount:      amount,
+			Type:        "transfer",
+			Status:      "completed",
+			Description: description,
+		}
+		return tx.CreateTransaction(transferTx)
+	})
+
+	if err != nil {
+		s.metrics.RecordError("transfer", err.Error())
+		return ErrTransactionFailed
+	}
+
+	// Invalidate caches
+	s.invalidateWalletCaches(ctx, sourceWallet.UserID)
+	s.invalidateWalletCaches(ctx, destWallet.UserID)
+
+	// Record metrics
+	s.metrics.RecordTransaction("transfer", amount)
+
+	return nil
+}
+
+func (s *service) TopUp(ctx context.Context, userID uint, cardID uint, amount float64) error {
+	// Get user role from context
+	roleVal := ctx.Value(UserRoleContextKey)
+	role, ok := roleVal.(string)
+	if !ok || role == "" {
+		role = "user" // Default to user limits
+	}
+
+	// Debug log
+	// fmt.Printf("TopUp - Role: %s, Amount: %.2f, Limit: %.2f\n", role, amount, s.config.Limits[role].MaxTransactionAmount)
+
+	limits := s.config.Limits[role]
+	if amount <= 0 {
+		return ErrInvalidAmount
+	}
+
+	if amount > limits.MaxTransactionAmount {
+		return fmt.Errorf("amount exceeds maximum limit of %v", limits.MaxTransactionAmount)
+	}
+
+	wallet, err := s.repo.GetByID(userID)
+	if err != nil {
+		return fmt.Errorf("wallet not found: %w", err)
+	}
+
+	if wallet.Status != "active" {
+		return ErrWalletLocked
+	}
+
+	// Process top-up
+	err = s.repo.ExecuteInTransaction(func(tx repositories.WalletRepository) error {
+		wallet.Balance += amount
+		if err := tx.Update(wallet); err != nil {
+			return err
+		}
+
+		topUpTx := &models.Transaction{
+			SenderID:    userID,
+			Amount:      amount,
+			Type:        "top_up",
+			Status:      "completed",
+			Description: fmt.Sprintf("Top up from card ending in %d", cardID),
+			Metadata: models.NewJSON(map[string]interface{}{
+				"card_id": cardID,
+			}),
+		}
+		return tx.CreateTransaction(topUpTx)
+	})
+
+	if err != nil {
+		s.metrics.RecordError("top_up", err.Error())
+		return ErrTransactionFailed
+	}
+
+	s.invalidateWalletCaches(ctx, wallet.UserID)
+	s.metrics.RecordTransaction("top_up", amount)
+
+	return nil
+}
+
+func (s *service) Withdraw(ctx context.Context, walletID uint, cardID uint, amount float64) error {
+	// Get user role from context
+	roleVal := ctx.Value(UserRoleContextKey)
+	role, ok := roleVal.(string)
+	if !ok || role == "" {
+		role = "user" // Default to user fees
+	}
+
+	// Calculate fee based on role
+	feePercent := s.config.WithdrawalFees[role]
+	fee := amount * feePercent
+
+	if amount <= 0 {
+		return ErrInvalidAmount
+	}
+
+	wallet, err := s.repo.GetByID(walletID)
+	if err != nil {
+		return fmt.Errorf("wallet not found: %w", err)
+	}
+
+	if wallet.Balance < amount {
+		return ErrInsufficientBalance
+	}
+
+	if wallet.Status != "active" {
+		return ErrWalletLocked
+	}
+
+	err = s.repo.ExecuteInTransaction(func(tx repositories.WalletRepository) error {
+		wallet.Balance -= amount
+		if err := tx.Update(wallet); err != nil {
+			return err
+		}
+
+		// Record main withdrawal
+		if err := tx.CreateTransaction(&models.Transaction{
+			SenderID:    walletID,
+			Amount:      amount,
+			Type:        "withdrawal",
+			Status:      "completed",
+			Description: fmt.Sprintf("Withdrawal to card ending in %d", cardID),
+			Metadata: models.NewJSON(map[string]interface{}{
+				"card_id": cardID,
+				"fee":     fee,
+			}),
+		}); err != nil {
+			return err
+		}
+
+		// Record fee transaction if there is a fee
+		if fee > 0 {
+			if err := tx.CreateTransaction(&models.Transaction{
+				SenderID:    walletID,
+				Amount:      fee,
+				Type:        "fee",
+				Status:      "completed",
+				Description: "Withdrawal fee",
+				Metadata: models.NewJSON(map[string]interface{}{
+					"withdrawal_amount": amount,
+					"fee_percent":       feePercent,
+				}),
+			}); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		s.metrics.RecordError("withdrawal", err.Error())
+		return ErrTransactionFailed
+	}
+
+	s.invalidateWalletCaches(ctx, wallet.UserID)
+	s.metrics.RecordTransaction("withdrawal", amount)
+
+	return nil
+}
+
+func (s *service) LockWallet(ctx context.Context, walletID uint, reason string) error {
+	wallet, err := s.repo.GetByID(walletID)
+	if err != nil {
+		return fmt.Errorf("wallet not found: %w", err)
+	}
+
+	wallet.Status = "locked"
+	wallet.StatusReason = reason
+
+	if err := s.repo.Update(wallet); err != nil {
+		return fmt.Errorf("failed to lock wallet: %w", err)
+	}
+
+	s.invalidateWalletCaches(ctx, wallet.UserID)
+	return nil
+}
+
+func (s *service) UnlockWallet(ctx context.Context, walletID uint) error {
+	wallet, err := s.repo.GetByID(walletID)
+	if err != nil {
+		return fmt.Errorf("wallet not found: %w", err)
+	}
+
+	wallet.Status = "active"
+	wallet.StatusReason = ""
+
+	if err := s.repo.Update(wallet); err != nil {
+		return fmt.Errorf("failed to unlock wallet: %w", err)
+	}
+
+	s.invalidateWalletCaches(ctx, wallet.UserID)
+	return nil
+}
+
+func (s *service) GetWithdrawalFeePercent() float64 {
+	// Default to user fee if no role specified
+	return s.config.WithdrawalFees["user"]
+}

@@ -21,7 +21,17 @@ type WalletConfig struct {
 	MaxDailyLimit     float64
 	MaxMonthlyLimit   float64
 	MinBalance        float64
+	Limits            map[string]TransactionLimits
+	WithdrawalFees    map[string]float64
 	ProcessingTimeout time.Duration
+}
+
+// TransactionLimits defines limits based on user role
+type TransactionLimits struct {
+	MaxTransactionAmount  float64
+	DailyTransactionLimit float64
+	MonthlyLimit          float64
+	MinTransactionAmount  float64
 }
 
 // OperationRequest represents a wallet operation request
@@ -61,6 +71,7 @@ type MetricsCollector interface {
 	RecordError(operation, errType string)
 
 	// Transaction metrics
+	RecordTransaction(txType string, amount float64)
 	RecordTransactionVolume(amount float64)
 	RecordDailyVolume(userID uint, amount float64)
 }
@@ -74,3 +85,9 @@ type CacheOperator interface {
 	Set(key string, value interface{}, expiry time.Duration) error
 	Delete(key string) error
 }
+
+type contextKey string
+
+const (
+	UserRoleContextKey contextKey = "userRole"
+)

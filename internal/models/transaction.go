@@ -1,10 +1,7 @@
 package models
 
 import (
-	"fmt"
 	"time"
-
-	"gorm.io/gorm"
 )
 
 const (
@@ -18,29 +15,27 @@ const (
 
 // Consolidated Transaction model
 type Transaction struct {
-	gorm.Model
-	TransactionID    string  `json:"transaction_id"`
-	Type             string  `json:"type"` // "qr", "direct", "card"
-	SenderID         uint    `json:"sender_id"`
-	ReceiverID       uint    `json:"receiver_id"`
-	Amount           float64 `json:"amount"`
-	Fee              float64
-	Currency         string `json:"currency"`
-	Status           string `json:"status"`
-	Reference        string
-	Description      string  `json:"description"`
-	QRCodeID         *string `json:"qr_code_id,omitempty"`
-	QRType           string  `json:"qr_type,omitempty"`
-	QROwnerID        uint    `json:"qr_owner_id,omitempty"`
-	QROwnerType      string  `json:"qr_owner_type,omitempty"`
-	PaymentMethod    string  `json:"payment_method" gorm:"default:'qr'"`
-	PaymentType      string  `json:"payment_type" gorm:"default:'direct'"`
-	CardID           *uint
-	MerchantID       *uint
-	MerchantName     string
-	MerchantCategory string
-	Metadata         JSON `json:"metadata" gorm:"type:jsonb"`
-	History          JSON `json:"history" gorm:"type:jsonb"`
+	ID               uint    `gorm:"primarykey"`
+	Type             string  `gorm:"not null"`
+	SenderID         uint    `gorm:"not null"`
+	ReceiverID       uint    `gorm:"not null"`
+	Amount           float64 `gorm:"not null"`
+	Description      string
+	Status           string  `gorm:"not null;default:'pending'"`
+	Fee              float64 `gorm:"default:0"`
+	Metadata         JSON    `gorm:"type:jsonb"`
+	Currency         string  `gorm:"default:'USD'"`
+	TransactionID    string  // External reference ID
+	Reference        string  // For linking related transactions
+	PaymentType      string  // Payment method used
+	PaymentMethod    string  // Additional payment details
+	MerchantID       *uint   // Optional merchant reference
+	MerchantName     string  // Merchant business name
+	MerchantCategory string  // Merchant business type
+	CardID           *uint   // Optional card reference
+	QRCodeID         *string // Optional QR code reference
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }
 
 type Location struct {
@@ -53,12 +48,4 @@ type DeviceInfo struct {
 	DeviceID   string
 	DeviceType string
 	IPAddress  string
-}
-
-// BeforeCreate hook to generate TransactionID if not set
-func (tx *Transaction) BeforeCreate(db *gorm.DB) error {
-	if tx.TransactionID == "" {
-		tx.TransactionID = fmt.Sprintf("TX-%d-%d", time.Now().Unix(), tx.ID)
-	}
-	return nil
 }

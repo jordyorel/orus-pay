@@ -7,7 +7,7 @@ import (
 	"math"
 	"orus/internal/models"
 	"orus/internal/repositories"
-	"time"
+	"orus/internal/services/wallet"
 
 	"gorm.io/gorm"
 )
@@ -51,6 +51,15 @@ func (s *service) ProcessTransaction(ctx context.Context, tx *models.Transaction
 	// Round amount to 2 decimal places
 	tx.Amount = math.Round(tx.Amount*100) / 100
 
+	// Get user role from context
+	roleVal := ctx.Value(wallet.UserRoleContextKey)
+	role, ok := roleVal.(string)
+	if !ok || role == "" {
+		role = "user" // Default to user role
+	}
+	// Create new context with role for wallet operations
+	ctxWithRole := context.WithValue(ctx, wallet.UserRoleContextKey, role)
+
 	// Risk assessment
 	riskScore := s.riskService.AssessTransaction(tx)
 	if riskScore > highRiskThreshold {
@@ -59,14 +68,14 @@ func (s *service) ProcessTransaction(ctx context.Context, tx *models.Transaction
 
 	// Process based on transaction type
 	switch tx.Type {
-	case models.TransactionTypeMerchantDirect, models.TransactionTypeQRPayment, "P2P_TRANSFER":
+	case models.TransactionTypeMerchantDirect, models.TransactionTypeQRPayment, "P2P_TRANSFER", "transfer":
 		if err := s.db.Transaction(func(txn *gorm.DB) error {
-			if err := s.walletService.Debit(ctx, tx.SenderID, tx.Amount); err != nil {
+			if err := s.walletService.Debit(ctxWithRole, tx.SenderID, tx.Amount); err != nil {
 				return err
 			}
-			if err := s.walletService.Credit(ctx, tx.ReceiverID, tx.Amount); err != nil {
+			if err := s.walletService.Credit(ctxWithRole, tx.ReceiverID, tx.Amount); err != nil {
 				// Rollback debit if credit fails
-				_ = s.walletService.Credit(ctx, tx.SenderID, tx.Amount)
+				_ = s.walletService.Credit(ctxWithRole, tx.SenderID, tx.Amount)
 				return err
 			}
 			return nil
@@ -87,16 +96,28 @@ func (s *service) ProcessTransaction(ctx context.Context, tx *models.Transaction
 }
 
 func (s *service) ProcessP2PTransfer(ctx context.Context, req TransferRequest) (*models.Transaction, error) {
+	// Create transaction
 	tx := &models.Transaction{
-		TransactionID: fmt.Sprintf("TX-%d-%d", time.Now().Unix(), req.SenderID),
-		Type:          "P2P_TRANSFER",
-		SenderID:      req.SenderID,
-		ReceiverID:    req.ReceiverID,
-		Amount:        req.Amount,
-		Description:   req.Description,
-		Status:        "pending",
+		Type:        "transfer",
+		SenderID:    req.SenderID,
+		ReceiverID:  req.ReceiverID,
+		Amount:      req.Amount,
+		Description: req.Description,
+		Status:      "pending",
+		Metadata:    models.NewJSON(req.Metadata),
 	}
-	return s.ProcessTransaction(ctx, tx)
+
+	// Get user role from context and ensure it's passed through
+	roleVal := ctx.Value(wallet.UserRoleContextKey)
+	role, ok := roleVal.(string)
+	if !ok || role == "" {
+		role = "user" // Default to user role
+	}
+	// Create new context with role
+	ctxWithRole := context.WithValue(ctx, wallet.UserRoleContextKey, role)
+
+	// Process the transaction
+	return s.ProcessTransaction(ctxWithRole, tx)
 }
 
 func (s *service) Process(ctx context.Context, tx *models.Transaction) error {

@@ -4,7 +4,8 @@ import (
 	"orus/internal/middleware"
 	"orus/internal/models"
 	"orus/internal/repositories"
-	"orus/internal/repositories/cache"
+	"orus/internal/services/auth"
+	"orus/internal/services/credit_card"
 	"orus/internal/services/merchant"
 	qr "orus/internal/services/qr_code"
 	"orus/internal/services/transaction"
@@ -14,17 +15,30 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+var walletService wallet.Service
+
 func SetupRoutes(app *fiber.App) {
 	// Initialize cache
 	redisClient := redis.NewClient(&redis.Options{
 		Addr: "localhost:6379",
 	})
-	noCtxCache, ctxCache := cache.NewCaches(redisClient)
+
+	// Initialize repositories
+	walletRepo := repositories.NewWalletRepository(repositories.DB)
+	cacheRepo := repositories.NewRedisCacheRepository(redisClient)
+	userRepo := repositories.NewUserRepository(repositories.DB)
+	cardRepo := repositories.NewCreditCardRepository(repositories.DB)
+
+	// Initialize auth service and handler
+	authService := auth.NewService(userRepo)
+	authHandler := NewAuthHandler(authService)
 
 	// Initialize services in correct order
-	walletService := wallet.NewService(
-		repositories.DB,
-		noCtxCache, // Uses no-context interface
+	cardService := credit_card.NewService(cardRepo)
+	walletService = wallet.NewService(
+		walletRepo,
+		cacheRepo,
+		cardService,
 		wallet.WalletConfig{},
 		&wallet.NoopMetricsCollector{},
 	)
@@ -33,12 +47,12 @@ func SetupRoutes(app *fiber.App) {
 		repositories.DB,
 		walletService,
 		walletService,
-		ctxCache, // Use ctxCache directly instead of NewContextAdapter
+		cacheRepo,
 	)
 
 	qrService := qr.NewService(
 		repositories.DB,
-		ctxCache, // Uses context interface
+		cacheRepo,
 		transactionService,
 		walletService,
 	)
@@ -59,25 +73,28 @@ func SetupRoutes(app *fiber.App) {
 
 	api := app.Group("/api")
 	api.Post("/register", userHandler.RegisterUser)
-	api.Post("/login", LoginUser)
-	api.Post("/refresh", RefreshToken)
+	api.Post("/login", authHandler.LoginUser)
+	api.Post("/refresh", authHandler.RefreshToken)
 
 	// Authenticated routes
 	authenticated := app.Group("/api", middleware.AuthMiddleware)
 
 	// Setup different route groups
-	setupUserRoutes(authenticated, paymentHandler, userHandler, cardHandler)
+	setupUserRoutes(authenticated, paymentHandler, userHandler, cardHandler, authHandler)
 	setupMerchantRoutes(authenticated, merchantHandler, paymentHandler)
 	setupEnterpriseRoutes(authenticated, enterpriseHandler)
 	setupAdminRoutes(app)
 }
 
-func setupUserRoutes(router fiber.Router, paymentHandler *PaymentHandler, userHandler *UserHandler, cardHandler *CreditCardHandler) {
+func setupUserRoutes(router fiber.Router, paymentHandler *PaymentHandler, userHandler *UserHandler, cardHandler *CreditCardHandler, authHandler *AuthHandler) {
+	// Initialize wallet handler
+	walletHandler := NewWalletHandler(walletService)
+
 	// Wallet routes
 	wallet := router.Group("/wallet")
-	wallet.Get("/", middleware.HasPermission(models.PermissionWalletRead), GetWallet)                //✅
-	wallet.Post("/topup", middleware.HasPermission(models.PermissionWalletWrite), TopUpWallet)       //✅
-	wallet.Post("/withdraw", middleware.HasPermission(models.PermissionWalletWrite), WithdrawToCard) //✅
+	wallet.Get("/", middleware.HasPermission(models.PermissionWalletRead), walletHandler.GetWallet)
+	wallet.Post("/topup", middleware.HasPermission(models.PermissionWalletWrite), walletHandler.TopUpWallet)
+	wallet.Post("/withdraw", middleware.HasPermission(models.PermissionWalletWrite), walletHandler.WithdrawToCard)
 
 	// Transaction routes
 	router.Get("/transactions", userHandler.GetUserTransactions) //✅
@@ -86,8 +103,8 @@ func setupUserRoutes(router fiber.Router, paymentHandler *PaymentHandler, userHa
 	router.Post("/credit-card", cardHandler.LinkCard)         // Add credit card route
 	router.Get("/credit-card", cardHandler.GetCards)          // Get user's cards
 	router.Delete("/credit-card/:id", cardHandler.DeleteCard) // Delete a card
-	router.Post("/change-password", ChangePassword)           //✅
-	router.Post("/logout", LogoutUser)                        //✅
+	router.Post("/change-password", authHandler.ChangePassword)
+	router.Post("/logout", authHandler.LogoutUser)
 
 	// Payment routes
 	payments := router.Group("/payment")

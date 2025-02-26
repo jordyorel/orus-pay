@@ -10,4 +10,5 @@ var (
 	ErrMonthlyLimitExceeded = errors.New("monthly limit exceeded")
 	ErrWalletLocked         = errors.New("wallet is locked")
 	ErrInvalidOperation     = errors.New("invalid operation")
+	ErrTransactionFailed    = errors.New("transaction failed")
 )

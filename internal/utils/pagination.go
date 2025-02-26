@@ -8,9 +8,11 @@ import (
 
 // Pagination holds pagination parameters.
 type Pagination struct {
-	Page   int
-	Limit  int
-	Offset int
+	Page     int   `json:"page"`
+	Limit    int   `json:"limit"`
+	Offset   int   `json:"offset"`
+	Total    int64 `json:"total"`
+	LastPage int   `json:"last_page"`
 }
 
 // GetPagination extracts the page and limit from the query parameters.
@@ -43,4 +45,21 @@ func TotalPages(totalItems int64, limit int) int {
 		pages++
 	}
 	return pages
+}
+
+func (p *Pagination) SetTotal(total int64) {
+	p.Total = total
+	p.LastPage = int((total + int64(p.Limit) - 1) / int64(p.Limit))
+}
+
+type PaginatedResponse struct {
+	Data       interface{} `json:"data"`
+	Pagination Pagination  `json:"pagination"`
+}
+
+func NewPaginatedResponse(data interface{}, pagination Pagination) PaginatedResponse {
+	return PaginatedResponse{
+		Data:       data,
+		Pagination: pagination,
+	}
 }

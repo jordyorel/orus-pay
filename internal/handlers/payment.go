@@ -1,10 +1,13 @@
 package handlers
 
 import (
+	"context"
 	"fmt"
 	"orus/internal/models"
 	qr "orus/internal/services/qr_code"
 	transaction "orus/internal/services/transaction"
+	"orus/internal/services/wallet"
+	"orus/internal/utils"
 	"orus/internal/utils/response"
 	"orus/internal/validation"
 
@@ -27,20 +30,23 @@ func NewPaymentHandler(qrSvc qr.Service, txSvc transaction.Service) *PaymentHand
 func (h *PaymentHandler) ProcessQRPayment(c *fiber.Ctx) error {
 	claims := c.Locals("claims").(*models.UserClaims)
 
-	var input struct {
-		QRCode      string                 `json:"qr_code" validate:"required"`
-		Amount      float64                `json:"amount" validate:"required,gt=0"`
-		Description string                 `json:"description"`
-		Metadata    map[string]interface{} `json:"metadata"`
-	}
+	var input models.QRPaymentRequest
 
 	if err := c.BodyParser(&input); err != nil {
-		return response.BadRequest(c, "Invalid request format")
+		return utils.BadRequest(c, "Invalid request format")
+	}
+
+	v := validation.New()
+	v.QRPayment(&input)
+	if !v.Valid() {
+		for _, msg := range v.Errors {
+			return utils.BadRequest(c, msg)
+		}
 	}
 
 	// Enrich metadata based on who is scanning
 	if input.Metadata == nil {
-		input.Metadata = make(map[string]interface{})
+		input.Metadata = make(map[string]any)
 	}
 	input.Metadata["scanner_role"] = claims.Role
 	input.Metadata["scanner_id"] = claims.UserID
@@ -71,24 +77,31 @@ func (h *PaymentHandler) ProcessQRPayment(c *fiber.Ctx) error {
 func (h *PaymentHandler) SendMoney(c *fiber.Ctx) error {
 	claims := c.Locals("claims").(*models.UserClaims)
 
-	var input struct {
-		ReceiverID  uint    `json:"receiver_id" validate:"required"`
-		Amount      float64 `json:"amount" validate:"required,gt=0"`
-		Description string  `json:"description"`
-	}
+	var input transaction.TransferRequest
 
 	if err := c.BodyParser(&input); err != nil {
-		return response.BadRequest(c, "Invalid request format")
+		return utils.BadRequest(c, "Invalid request format")
 	}
 
-	req := transaction.TransferRequest{
-		SenderID:    claims.UserID, // Set from authenticated user
-		ReceiverID:  input.ReceiverID,
-		Amount:      input.Amount,
-		Description: input.Description,
+	// Set sender ID before validation
+	input.SenderID = claims.UserID
+
+	// Create context with user role
+	ctx := context.WithValue(c.Context(), wallet.UserRoleContextKey, claims.Role)
+
+	// Debug log
+	fmt.Printf("SendMoney - User Role: %s, From: %d, To: %d, Amount: %.2f\n",
+		claims.Role, claims.UserID, input.ReceiverID, input.Amount)
+
+	v := validation.New()
+	v.Transfer(&input)
+	if !v.Valid() {
+		for _, msg := range v.Errors {
+			return utils.BadRequest(c, fmt.Sprintf("Validation error: %s", msg))
+		}
 	}
 
-	tx, err := h.transactionService.ProcessP2PTransfer(c.Context(), req)
+	tx, err := h.transactionService.ProcessP2PTransfer(ctx, input)
 	if err != nil {
 		return response.Error(c, fiber.StatusBadRequest, err.Error())
 	}

@@ -7,6 +7,33 @@ import (
 	"unicode"
 )
 
+// Validator defines validation methods
+type Validator struct {
+	Errors map[string]string
+}
+
+// New creates a new validator
+func New() *Validator {
+	return &Validator{Errors: make(map[string]string)}
+}
+
+// Valid checks if there are any validation errors
+func (v *Validator) Valid() bool {
+	return len(v.Errors) == 0
+}
+
+// AddError adds an error to the validator
+func (v *Validator) AddError(field, message string) {
+	v.Errors[field] = message
+}
+
+// Check adds an error if the condition is false
+func (v *Validator) Check(ok bool, field, message string) {
+	if !ok {
+		v.AddError(field, message)
+	}
+}
+
 // Email validates email format
 func (v *Validator) Email(field, email string) {
 	v.Check(emailRegex.MatchString(email), field, "must be a valid email address")

@@ -1,21 +1,32 @@
 package models
 
-import "gorm.io/gorm"
+import "time"
 
-// CreateCreditCard represents the user's credit card data (only storing the tokenized values)
-type CreateCreditCard struct {
-	gorm.Model
-	UserID      uint   `gorm:"not null;index" json:"user_id"`
-	CardNumber  string `gorm:"not null" json:"card_number"`
-	CardType    string `gorm:"not null" json:"card_type"`
-	ExpiryMonth string `gorm:"not null" json:"expiry_month"`
-	ExpiryYear  string `gorm:"not null" json:"expiry_year"`
-	Status      string `gorm:"not null;default:'active'" json:"status"`
+// CreditCard represents a stored credit card
+type CreditCard struct {
+	ID          uint   `gorm:"primarykey"`
+	UserID      uint   `gorm:"not null;index"`
+	CardNumber  string `gorm:"not null"`
+	CardType    string `gorm:"not null"`
+	ExpiryMonth string `gorm:"not null"`
+	ExpiryYear  string `gorm:"not null"`
+	LastFour    string `gorm:"not null"`
+	IsDefault   bool   `gorm:"default:false"`
+	Status      string `gorm:"default:'active'"`
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
-// VisaCardToken represents the card tokenization result returned after tokenizing the card.
+// VisaCardToken represents the card tokenization result
 type VisaCardToken struct {
-	Token    string `json:"token"`     // Tokenized card number returned from the payment processor
-	Expiry   string `json:"expiry"`    // Expiry date in MM/YY format
-	CardType string `json:"card_type"` // Card type (Visa, Mastercard, etc.)
+	Token    string `json:"token"`
+	Expiry   string `json:"expiry"`
+	CardType string `json:"card_type"`
+}
+
+// CreateCardInput represents the input for creating a new card
+type CreateCardInput struct {
+	CardNumber  string `json:"card_number"`
+	ExpiryMonth string `json:"expiry_month"`
+	ExpiryYear  string `json:"expiry_year"`
 }

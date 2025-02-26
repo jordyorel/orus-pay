@@ -18,7 +18,7 @@ func NewService() *Service {
 	}
 }
 
-func (s *Service) LinkCard(userID uint, input CreateCardInput) (*models.CreateCreditCard, error) {
+func (s *Service) LinkCard(userID uint, input CreateCardInput) (*models.CreditCard, error) {
 	if err := s.validateCardInput(input); err != nil {
 		return nil, err
 	}
@@ -29,7 +29,7 @@ func (s *Service) LinkCard(userID uint, input CreateCardInput) (*models.CreateCr
 		return nil, fmt.Errorf("card tokenization failed: %w", err)
 	}
 
-	cardRecord := &models.CreateCreditCard{
+	cardRecord := &models.CreditCard{
 		UserID:      userID,
 		CardNumber:  tokenizedCard.Token,
 		CardType:    tokenizedCard.CardType,
@@ -45,7 +45,7 @@ func (s *Service) LinkCard(userID uint, input CreateCardInput) (*models.CreateCr
 	return cardRecord, nil
 }
 
-func (s *Service) GetUserCards(userID uint) ([]models.CreateCreditCard, error) {
+func (s *Service) GetUserCards(userID uint) ([]models.CreditCard, error) {
 	return repositories.GetCreditCardsByUserID(userID)
 }
 

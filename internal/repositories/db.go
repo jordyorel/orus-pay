@@ -27,7 +27,7 @@ func InitDB() error {
 		&models.Wallet{},
 		&models.Merchant{},    // Now includes limits
 		&models.Transaction{}, // Consolidated transaction model
-		&models.CreateCreditCard{},
+		&models.CreditCard{},
 		&models.KYCVerification{},
 		&models.Enterprise{}, // Consolidated enterprise model
 		&models.QRCode{},

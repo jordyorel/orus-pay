@@ -1,29 +1,21 @@
 package handlers
 
 import (
-	"orus/internal/models"
-	"orus/internal/repositories"
-	"orus/internal/utils"
-	"regexp"
-
-	"orus/internal/validation"
-
-	qr "orus/internal/services/qr_code"
-	"orus/internal/services/wallet"
-
 	"fmt"
 	"log"
 	"math"
+	"orus/internal/models"
+	"orus/internal/repositories"
+	qr "orus/internal/services/qr_code"
+	"orus/internal/services/wallet"
+	"orus/internal/utils"
+	"orus/internal/validation"
 
 	"github.com/gofiber/fiber/v2"
 	"golang.org/x/crypto/bcrypt"
 )
 
 const maxTransactionLimit = 100 // Maximum allowed transactions per page
-
-// Regular expressions for input validation
-var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
-var phoneRegex = regexp.MustCompile(`^\+?[0-9]{7,15}$`) // Allows optional + and 7-15 digits
 
 type UserHandler struct {
 	qrService     qr.Service
@@ -38,49 +30,18 @@ func NewUserHandler(qrSvc qr.Service, walletSvc wallet.Service) *UserHandler {
 }
 
 func (h *UserHandler) RegisterUser(c *fiber.Ctx) error {
-	var input struct {
-		Name     string `json:"name"`
-		Email    string `json:"email"`
-		Phone    string `json:"phone"`
-		Password string `json:"password"`
-		Role     string `json:"role"`
-	}
-
+	var input models.CreateUserInput
 	if err := c.BodyParser(&input); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+		return utils.BadRequest(c, "Invalid request body")
 	}
 
-	// Validate role
-	validRoles := map[string]bool{
-		"user":       true,
-		"merchant":   true,
-		"enterprise": true,
-	}
-	if !validRoles[input.Role] {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Invalid role. Must be one of: user, merchant, enterprise",
-		})
-	}
-
-	// Validate password
-	if len(input.Password) < 8 || !validation.HasSpecialChar(input.Password) {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Password must be at least 8 characters and contain special characters",
-		})
-	}
-
-	// Validate email
-	if !emailRegex.MatchString(input.Email) {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Invalid email format",
-		})
-	}
-
-	// Validate phone
-	if !phoneRegex.MatchString(input.Phone) {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Invalid phone format",
-		})
+	v := validation.New()
+	v.UserRegistration(&input)
+	if !v.Valid() {
+		// Get first error from the map
+		for _, msg := range v.Errors {
+			return utils.BadRequest(c, msg)
+		}
 	}
 
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
@@ -111,11 +72,12 @@ func (h *UserHandler) RegisterUser(c *fiber.Ctx) error {
 		})
 	}
 
-	// Get wallet
-	wallet, err := h.walletService.GetWallet(c.Context(), createdUser.ID)
+	// Create wallet for the new user
+	wallet, err := h.walletService.CreateWallet(c.Context(), createdUser.ID, "USD")
 	if err != nil {
+		log.Printf("Failed to create wallet for user %d: %v", createdUser.ID, err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Failed to get wallet info",
+			"error": "Failed to create wallet",
 		})
 	}
 
@@ -163,6 +125,8 @@ func (h *UserHandler) GetUserTransactions(c *fiber.Ctx) error {
 		return utils.InternalError(c, "Failed to fetch transactions")
 	}
 
+	pagination.SetTotal(int64(len(transactions)))
+
 	// Sanitize transaction data
 	sanitized := make([]map[string]interface{}, len(transactions))
 	for i, t := range transactions {
@@ -175,12 +139,5 @@ func (h *UserHandler) GetUserTransactions(c *fiber.Ctx) error {
 		}
 	}
 
-	return c.JSON(fiber.Map{
-		"transactions": sanitized,
-		"pagination": fiber.Map{
-			"current_page": pagination.Page,
-			"total_pages":  utils.TotalPages(int64(len(transactions)), pagination.Limit),
-			"total_items":  len(transactions),
-		},
-	})
+	return c.JSON(utils.NewPaginatedResponse(sanitized, pagination))
 }

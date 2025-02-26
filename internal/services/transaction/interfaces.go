@@ -17,9 +17,9 @@ type BalanceService interface {
 }
 
 type TransferRequest struct {
-	SenderID    uint
-	ReceiverID  uint
-	Amount      float64
-	Description string
-	Metadata    map[string]interface{}
+	SenderID    uint                   `json:"-"` // Set by handler
+	ReceiverID  uint                   `json:"receiver_id"`
+	Amount      float64                `json:"amount"`
+	Description string                 `json:"description"`
+	Metadata    map[string]interface{} `json:"metadata,omitempty"`
 }

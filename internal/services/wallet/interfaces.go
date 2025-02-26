@@ -15,6 +15,10 @@ type Service interface {
 	Credit(ctx context.Context, userID uint, amount float64) error
 	Debit(ctx context.Context, userID uint, amount float64) error
 
+	// Card operations
+	TopUp(ctx context.Context, userID uint, cardID uint, amount float64) error
+	Withdraw(ctx context.Context, userID uint, cardID uint, amount float64) error
+
 	// Balance operations
 	GetBalance(ctx context.Context, userID uint) (float64, error)
 	ValidateBalance(ctx context.Context, userID uint, amount float64) error
@@ -29,6 +33,9 @@ type Service interface {
 	// Transaction processing
 	Process(ctx context.Context, tx *models.Transaction) error
 	Rollback(ctx context.Context, tx *models.Transaction) error
+
+	// New method
+	GetWithdrawalFeePercent() float64
 }
 
 type DB interface {
