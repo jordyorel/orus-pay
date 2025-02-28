@@ -11,6 +11,8 @@ import (
 
 	"orus/internal/utils/response"
 
+	"strconv"
+
 	"github.com/gofiber/fiber/v2"
 	"gorm.io/gorm"
 )
@@ -18,12 +20,14 @@ import (
 type MerchantHandler struct {
 	merchantService *merchant.Service
 	qrService       qr.Service
+	transactionRepo repositories.TransactionRepository
 }
 
-func NewMerchantHandler(merchantSvc *merchant.Service, qrSvc qr.Service) *MerchantHandler {
+func NewMerchantHandler(merchantSvc *merchant.Service, qrSvc qr.Service, transactionRepo repositories.TransactionRepository) *MerchantHandler {
 	return &MerchantHandler{
 		merchantService: merchantSvc,
 		qrService:       qrSvc,
+		transactionRepo: transactionRepo,
 	}
 }
 
@@ -242,4 +246,28 @@ func (h *MerchantHandler) SetWebhookURL(c *fiber.Ctx) error {
 	}
 
 	return response.Success(c, "Webhook URL updated successfully", nil)
+}
+
+func (h *MerchantHandler) GetMerchantTransactions(c *fiber.Ctx) error {
+	claims := c.Locals("claims").(*models.UserClaims)
+
+	// Parse pagination parameters
+	page, _ := strconv.Atoi(c.Query("page", "1"))
+	limit, _ := strconv.Atoi(c.Query("limit", "10"))
+	offset := (page - 1) * limit
+
+	// Get transactions
+	transactions, total, err := h.transactionRepo.GetMerchantTransactions(claims.UserID, limit, offset)
+	if err != nil {
+		return response.Error(c, fiber.StatusInternalServerError, "Failed to get transactions")
+	}
+
+	return response.Success(c, "Transactions retrieved", fiber.Map{
+		"transactions": transactions,
+		"pagination": fiber.Map{
+			"total": total,
+			"page":  page,
+			"limit": limit,
+		},
+	})
 }

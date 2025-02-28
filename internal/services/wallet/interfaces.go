@@ -22,6 +22,7 @@ type Service interface {
 	// Balance operations
 	GetBalance(ctx context.Context, userID uint) (float64, error)
 	ValidateBalance(ctx context.Context, userID uint, amount float64) error
+	UpdateBalanceOnly(ctx context.Context, userID uint, amount float64) error
 
 	// Wallet management
 	CreateWallet(ctx context.Context, userID uint, currency string) (*models.Wallet, error)

@@ -6,7 +6,20 @@ import (
 	"errors"
 	"fmt"
 	"orus/internal/models"
+
+	"gorm.io/gorm"
 )
+
+type MerchantRepository interface {
+	GetByID(id uint) (*models.Merchant, error)
+	GetByUserID(userID uint) (*models.Merchant, error)
+	Create(merchant *models.Merchant) error
+	Update(merchant *models.Merchant) error
+}
+
+type merchantRepository struct {
+	db *gorm.DB
+}
 
 func GetMerchantByUserID(userID uint) (*models.Merchant, error) {
 	var merchant models.Merchant
@@ -64,14 +77,6 @@ func UpdateMerchant(merchant *models.Merchant) error {
 	return DB.Model(&models.Merchant{}).Where("id = ?", merchant.ID).Updates(merchant).Error
 }
 
-func GetMerchantTransactions(merchantID uint) ([]models.Transaction, error) {
-	var transactions []models.Transaction
-	err := DB.Where("merchant_id = ?", merchantID).
-		Order("created_at DESC").
-		Find(&transactions).Error
-	return transactions, err
-}
-
 func GenerateMerchantAPIKey(merchantID uint) (string, error) {
 	// Generate random bytes for API key
 	bytes := make([]byte, 32)
@@ -115,4 +120,30 @@ func GetMerchantStaticQR(userID uint) (*models.QRCode, error) {
 		return nil, err
 	}
 	return &qr, nil
+}
+
+func NewMerchantRepository(db *gorm.DB) MerchantRepository {
+	return &merchantRepository{
+		db: db,
+	}
+}
+
+func (r *merchantRepository) GetByID(id uint) (*models.Merchant, error) {
+	var merchant models.Merchant
+	err := r.db.First(&merchant, id).Error
+	return &merchant, err
+}
+
+func (r *merchantRepository) GetByUserID(userID uint) (*models.Merchant, error) {
+	var merchant models.Merchant
+	err := r.db.Where("user_id = ?", userID).First(&merchant).Error
+	return &merchant, err
+}
+
+func (r *merchantRepository) Create(merchant *models.Merchant) error {
+	return r.db.Create(merchant).Error
+}
+
+func (r *merchantRepository) Update(merchant *models.Merchant) error {
+	return r.db.Save(merchant).Error
 }

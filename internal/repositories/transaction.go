@@ -5,9 +5,27 @@ import (
 	"fmt"
 	"log"
 	"orus/internal/models"
+	"time"
 
 	"gorm.io/gorm"
 )
+
+// Add these methods to your existing TransactionRepository interface
+type TransactionRepository interface {
+	// ... existing methods ...
+
+	// Dashboard-specific methods
+	GetTransactionStats(userID uint) (count int, volume float64, err error)
+	GetLastTransaction(userID uint) (*models.Transaction, error)
+	GetRecentMerchants(userID uint, limit int) ([]string, error)
+	GetSpendingByCategory(userID uint, since time.Time) (map[string]float64, error)
+	GetIncomeByCategory(userID uint, since time.Time) (map[string]float64, error)
+	GetUniqueCustomerCount(merchantID uint) (int, error)
+	GetTransactionRates(merchantID uint) (successRate, chargebackRate float64, err error)
+	GetVolumeOverTime(userID uint, startDate, endDate time.Time) (map[string]float64, error)
+	GetTransactionCountByType(userID uint, startDate, endDate time.Time) (map[string]int, error)
+	GetMerchantTransactions(merchantID uint, limit, offset int) ([]models.Transaction, int64, error)
+}
 
 func CreateTransaction(tx *models.Transaction) error {
 	return DB.Create(tx).Error

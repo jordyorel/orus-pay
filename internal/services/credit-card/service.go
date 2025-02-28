@@ -63,3 +63,7 @@ func (s *serviceImpl) DeleteCard(userID uint, cardID uint) error {
 
 	return repositories.DeleteCreditCard(cardID)
 }
+
+func (s *serviceImpl) GetByID(cardID uint) (*models.CreditCard, error) {
+	return repositories.GetCreditCardByID(cardID)
+}

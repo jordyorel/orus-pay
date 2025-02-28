@@ -614,6 +614,13 @@ func (s *service) TopUp(ctx context.Context, userID uint, cardID uint, amount fl
 		return ErrWalletLocked
 	}
 
+	// Get card details
+	card, err := s.cardService.GetByID(cardID)
+	if err != nil {
+		return fmt.Errorf("failed to get card details: %w", err)
+	}
+	cardLastFour := card.CardNumber[len(card.CardNumber)-4:]
+
 	// Process top-up
 	err = s.repo.ExecuteInTransaction(func(tx repositories.WalletRepository) error {
 		wallet.Balance += amount
@@ -622,13 +629,21 @@ func (s *service) TopUp(ctx context.Context, userID uint, cardID uint, amount fl
 		}
 
 		topUpTx := &models.Transaction{
-			SenderID:    userID,
-			Amount:      amount,
-			Type:        "top_up",
-			Status:      "completed",
-			Description: fmt.Sprintf("Top up from card ending in %d", cardID),
+			Type:          "top_up",
+			SenderID:      userID,
+			ReceiverID:    0, // No receiver for top-ups
+			Amount:        amount,
+			Status:        "completed",
+			TransactionID: fmt.Sprintf("TXN-%d-%d", userID, time.Now().UnixNano()),
+			Reference:     fmt.Sprintf("TOP-%d-%d", userID, time.Now().UnixNano()),
+			PaymentType:   "card_topup",
+			PaymentMethod: "credit_card",
+			CardID:        &cardID,
+			Category:      "Top Up",
+			Description:   fmt.Sprintf("Top up from card ending in %s", cardLastFour),
 			Metadata: models.NewJSON(map[string]interface{}{
-				"card_id": cardID,
+				"card_last_four": cardLastFour,
+				"card_type":      card.CardType,
 			}),
 		}
 		return tx.CreateTransaction(topUpTx)
@@ -763,4 +778,15 @@ func (s *service) UnlockWallet(ctx context.Context, walletID uint) error {
 func (s *service) GetWithdrawalFeePercent() float64 {
 	// Default to user fee if no role specified
 	return s.config.WithdrawalFees["user"]
+}
+
+// Add new methods for silent balance updates
+func (s *service) UpdateBalanceOnly(ctx context.Context, userID uint, amount float64) error {
+	wallet, err := s.repo.GetByID(userID)
+	if err != nil {
+		return fmt.Errorf("wallet not found: %w", err)
+	}
+
+	wallet.Balance += amount
+	return s.repo.Update(wallet)
 }

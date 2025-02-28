@@ -10,6 +10,7 @@ type WalletService interface {
 	Rollback(ctx context.Context, tx *models.Transaction) error
 	Debit(ctx context.Context, userID uint, amount float64) error
 	Credit(ctx context.Context, userID uint, amount float64) error
+	UpdateBalanceOnly(ctx context.Context, userID uint, amount float64) error
 }
 
 type BalanceService interface {

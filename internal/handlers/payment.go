@@ -161,3 +161,9 @@ func (h *PaymentHandler) ProcessPayment(c *fiber.Ctx) error {
 
 	return response.Success(c, "Payment processed successfully", result)
 }
+
+// Supports multiple payment flows:
+// - QR code payments
+// - P2P transfers
+// - Merchant payments
+// - Cross-role transactions (user ↔ merchant)

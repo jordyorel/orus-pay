@@ -14,11 +14,11 @@ type UserType string
 
 const (
 	// QR Types
-	TypeStatic       QRType = "static"         // Base type
+	TypeStatic       QRType = "static"         // For fixed-amount payments
 	TypeReceive      QRType = "static_receive" // For receiving money
 	TypePaymentCode  QRType = "payment_code"   // For payments
-	TypeMerchantScan QRType = "static_scan"
-	TypeDynamic      QRType = "dynamic"
+	TypeMerchantScan QRType = "static_scan"    // Merchant-initiated payments
+	TypeDynamic      QRType = "dynamic"        // For variable amounts
 	TypePayment      QRType = "payment"
 
 	// User Types

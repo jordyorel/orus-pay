@@ -11,6 +11,7 @@ import (
 	"orus/internal/repositories"
 	"orus/internal/services/auth"
 	creditcard "orus/internal/services/credit-card"
+	"orus/internal/services/dashboard"
 	"orus/internal/services/merchant"
 	"orus/internal/services/payment"
 	qr "orus/internal/services/qr_code"
@@ -72,13 +73,24 @@ func SetupRoutes(app *fiber.App, db *gorm.DB) {
 
 	paymentService := payment.NewService(walletService, transactionService, qrService)
 
+	// Initialize dashboard service and handler
+	dashboardService := dashboard.NewService(
+		repositories.NewTransactionRepository(db),
+		repositories.NewWalletRepository(db),
+		repositories.NewMerchantRepository(db),
+		userRepo,
+		db,
+	)
+	dashboardHandler := handlers.NewDashboardHandler(dashboardService)
+
 	// Initialize handlers
 	paymentHandler := handlers.NewPaymentHandler(qrService, paymentService)
 	merchantHandler := handlers.NewMerchantHandler(
 		merchant.NewService(qrService, transactionService, walletService),
 		qrService,
+		repositories.NewTransactionRepository(db),
 	)
-	enterpriseHandler := handlers.NewEnterpriseHandler()
+	// enterpriseHandler := handlers.NewEnterpriseHandler()
 	userHandler := handlers.NewUserHandler(userService, walletService, qrService)
 	cardHandler := handlers.NewCreditCardHandler(cardRepo)
 
@@ -97,8 +109,11 @@ func SetupRoutes(app *fiber.App, db *gorm.DB) {
 	// Setup different route groups
 	setupUserRoutes(protected, paymentHandler, userHandler, cardHandler, authHandler)
 	setupMerchantRoutes(protected, merchantHandler, paymentHandler)
-	setupEnterpriseRoutes(protected, enterpriseHandler)
+	// setupEnterpriseRoutes(protected, enterpriseHandler)
 	setupAdminRoutes(app, jwtSecret)
+
+	// Add dashboard routes
+	addDashboardRoutes(app, dashboardHandler, authMiddleware.Handler)
 }
 
 func setupUserRoutes(router fiber.Router, paymentHandler *handlers.PaymentHandler, userHandler *handlers.UserHandler, cardHandler *handlers.CreditCardHandler, authHandler *handlers.AuthHandler) {
@@ -143,12 +158,9 @@ func setupMerchantRoutes(router fiber.Router, h *handlers.MerchantHandler, payme
 	// Integration Settings
 	merchant.Post("/:merchantId/apikey", middleware.HasPermission(models.PermissionMerchantWrite), h.GenerateAPIKey)
 	merchant.Post("/:merchantId/webhook", middleware.HasPermission(models.PermissionMerchantWrite), h.SetWebhookURL)
-}
 
-func setupEnterpriseRoutes(router fiber.Router, h *handlers.EnterpriseHandler) {
-	enterprise := router.Group("/enterprise", middleware.HasPermission("enterprise:read"))
-	enterprise.Post("/", h.CreateEnterprise)
-	enterprise.Post("/:enterpriseId/apikey", h.GenerateAPIKey)
+	// Transactions
+	merchant.Get("/transactions", h.GetMerchantTransactions)
 }
 
 func setupAdminRoutes(app *fiber.App, jwtSecret string) {
@@ -160,4 +172,16 @@ func setupAdminRoutes(app *fiber.App, jwtSecret string) {
 	admin.Delete("/users/:id", middleware.HasPermission(models.PermissionWriteAdmin), handlers.DeleteUser)
 	admin.Get("/wallets", middleware.HasPermission(models.PermissionWriteAdmin), handlers.GetAllWallets)
 	admin.Get("/credit-cards", middleware.HasPermission(models.PermissionWriteAdmin), handlers.GetAllCreditCards)
+}
+
+func addDashboardRoutes(app *fiber.App, handler *handlers.DashboardHandler, authMiddleware fiber.Handler) {
+	dashboard := app.Group("/api/dashboard", authMiddleware)
+
+	// User dashboard routes
+	dashboard.Get("/user", handler.GetUserDashboard)
+	dashboard.Get("/user/analytics", handler.GetTransactionAnalytics)
+
+	// Merchant dashboard routes
+	dashboard.Get("/merchant", middleware.HasPermission(models.PermissionMerchantRead), handler.GetMerchantDashboard)
+	dashboard.Get("/merchant/analytics", middleware.HasPermission(models.PermissionMerchantRead), handler.GetTransactionAnalytics)
 }

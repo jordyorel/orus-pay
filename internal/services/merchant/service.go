@@ -70,36 +70,78 @@ func (s *Service) ProcessDirectCharge(merchantID uint, input ChargeInput) (*mode
 		return nil, fmt.Errorf("invalid payment code: %w", err)
 	}
 
+	// Verify this is a payment code QR, not a receive QR
+	if qrCode.Type != string(qr_code.TypePaymentCode) {
+		return nil, fmt.Errorf("invalid QR type: merchant can only scan payment codes")
+	}
+
+	// Get merchant details
+	merchant, err := repositories.GetMerchantByUserID(merchantID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// Create default merchant profile
+			merchant = &models.Merchant{
+				UserID:                  merchantID,
+				BusinessName:            "Default Business",
+				BusinessType:            "retail",
+				Status:                  "active",
+				ComplianceLevel:         "medium_risk",
+				RiskScore:               50,
+				DailyTransactionLimit:   DefaultDailyLimit,
+				MonthlyTransactionLimit: DefaultMonthlyLimit,
+				MinTransactionAmount:    DefaultMinAmount,
+				MaxTransactionAmount:    DefaultMaxAmount,
+			}
+
+			if err := repositories.DB.Create(merchant).Error; err != nil {
+				return nil, fmt.Errorf("failed to create merchant profile: %w", err)
+			}
+		} else {
+			return nil, fmt.Errorf("merchant not found: %w", err)
+		}
+	}
+
 	// Get customer ID from QR code
 	customerID := qrCode.UserID
 
-	// Verify customer wallet exists
-	_, err := s.walletService.GetWallet(context.Background(), customerID)
-	if err != nil {
-		return nil, fmt.Errorf("customer wallet not found: %w", err)
-	}
-
-	// Check if customer has sufficient balance
+	// Verify customer wallet exists and has sufficient balance
 	if err := s.walletService.ValidateBalance(context.Background(), customerID, input.Amount); err != nil {
 		return nil, fmt.Errorf("insufficient balance: %w", err)
 	}
 
-	// Create transaction
-	tx := &models.Transaction{
-		Type:        models.TransactionTypeMerchantScan,
-		SenderID:    customerID,
-		ReceiverID:  merchantID,
-		Amount:      input.Amount,
-		Description: input.Description,
-		Status:      "pending",
-		Metadata: models.NewJSON(map[string]interface{}{
-			"payment_code": input.PaymentCode,
-			"merchant_id":  merchantID,
-		}),
+	metadata := map[string]interface{}{
+		"scanner_role":      "merchant",
+		"payment_code":      input.PaymentCode,
+		"merchant_id":       merchantID,
+		"merchant_name":     merchant.BusinessName,
+		"merchant_category": merchant.BusinessType,
+		"payment_type":      "merchant_scan",
+		"device_type":       "pos",
 	}
 
-	// Process the transaction
-	return s.transactionService.ProcessTransaction(context.Background(), tx)
+	tx, err := s.qrService.ProcessQRPayment(
+		context.Background(),
+		input.PaymentCode,
+		input.Amount,
+		merchantID,
+		input.Description,
+		metadata,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Enrich transaction with merchant details
+	tx.MerchantID = &merchant.ID
+	tx.MerchantName = merchant.BusinessName
+	tx.MerchantCategory = merchant.BusinessType
+
+	// Update the transaction record
+	if err := repositories.DB.Save(tx).Error; err != nil {
+		return nil, fmt.Errorf("failed to update transaction with merchant details: %w", err)
+	}
+
+	return tx, nil
 }
 
 // Move all merchant service methods here

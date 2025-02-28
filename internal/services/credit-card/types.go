@@ -2,7 +2,6 @@ package creditcard
 
 import (
 	"orus/internal/models"
-	"orus/internal/repositories"
 )
 
 // CreateCardInput represents the input for creating a new card
@@ -25,10 +24,5 @@ type Service interface {
 	LinkCard(userID uint, input CreateCardInput) (*models.CreditCard, error)
 	GetUserCards(userID uint) ([]models.CreditCard, error)
 	DeleteCard(userID uint, cardID uint) error
-}
-
-// service implements the Service interface
-type service struct {
-	tokenizer Tokenizer
-	repo      repositories.CreditCardRepository
+	GetByID(cardID uint) (*models.CreditCard, error)
 }

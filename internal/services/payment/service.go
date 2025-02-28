@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"orus/internal/models"
+	"orus/internal/repositories"
+	"time"
 )
 
 type service struct {
@@ -103,14 +105,28 @@ func (s *service) ProcessMerchantPayment(
 		return nil, fmt.Errorf("insufficient balance: %w", err)
 	}
 
+	// Get merchant details
+	merchant, err := repositories.GetMerchantByUserID(merchantID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get merchant details: %w", err)
+	}
+
 	// Create merchant payment transaction
 	tx := &models.Transaction{
-		Type:        "merchant_payment",
-		SenderID:    customerID,
-		ReceiverID:  merchantID,
-		Amount:      amount,
-		Description: description,
-		Status:      "pending",
+		Type:             "merchant_payment",
+		SenderID:         customerID,
+		ReceiverID:       merchantID,
+		Amount:           amount,
+		Description:      description,
+		Status:           "pending",
+		TransactionID:    fmt.Sprintf("MTXN-%d-%d", merchantID, time.Now().UnixNano()),
+		Reference:        fmt.Sprintf("MREF-%d-%d", merchantID, time.Now().UnixNano()),
+		PaymentType:      "qr_scan",
+		PaymentMethod:    "wallet",
+		MerchantID:       &merchantID,
+		Category:         "Sale",
+		MerchantName:     merchant.BusinessName,
+		MerchantCategory: merchant.BusinessType,
 	}
 
 	// Process the transaction

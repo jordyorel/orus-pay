@@ -38,6 +38,7 @@ type Transaction struct {
 	MerchantCategory string  // Merchant business type
 	CardID           *uint   // Optional card reference
 	QRCodeID         *string // Optional QR code reference
+	Category         string  `gorm:"type:varchar(50)"`
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 }

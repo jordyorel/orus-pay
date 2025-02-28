@@ -4,10 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"orus/internal/models"
 	"orus/internal/repositories"
-	"orus/internal/services/wallet"
 
 	"gorm.io/gorm"
 )
@@ -41,50 +39,31 @@ func NewService(
 }
 
 func (s *service) ProcessTransaction(ctx context.Context, tx *models.Transaction) (*models.Transaction, error) {
-	// Round amount to 2 decimal places
-	tx.Amount = math.Round(tx.Amount*100) / 100
-
-	// Get user role from context
-	roleVal := ctx.Value(wallet.UserRoleContextKey)
-	role, ok := roleVal.(string)
-	if !ok || role == "" {
-		role = "user" // Default to user role
-	}
-	// Create new context with role for wallet operations
-	ctxWithRole := context.WithValue(ctx, wallet.UserRoleContextKey, role)
-
-	// Risk assessment
-	riskScore := s.riskService.AssessTransaction(tx)
-	if riskScore > highRiskThreshold {
-		return nil, ErrHighRiskTransaction
+	// Validate transaction
+	if err := s.validateTransaction(tx); err != nil {
+		return nil, err
 	}
 
-	// Process based on transaction type
-	switch tx.Type {
-	case models.TransactionTypeMerchantDirect, models.TransactionTypeQRPayment,
-		models.TransactionTypeP2PTransfer, models.TransactionTypeTransfer,
-		models.TransactionTypeQRCode, models.TransactionTypeMerchantScan:
-		if err := s.db.Transaction(func(txn *gorm.DB) error {
-			if err := s.walletService.Debit(ctxWithRole, tx.SenderID, tx.Amount); err != nil {
-				return err
-			}
-			if err := s.walletService.Credit(ctxWithRole, tx.ReceiverID, tx.Amount); err != nil {
-				// Rollback debit if credit fails
-				_ = s.walletService.Credit(ctxWithRole, tx.SenderID, tx.Amount)
-				return err
-			}
-			return nil
-		}); err != nil {
-			return nil, err
+	// Process in a single database transaction
+	err := s.db.Transaction(func(dbTx *gorm.DB) error {
+		// Update sender's balance
+		if err := s.walletService.UpdateBalanceOnly(ctx, tx.SenderID, -tx.Amount); err != nil {
+			return err
 		}
-		tx.Status = "completed"
 
-	default:
-		return nil, fmt.Errorf("unsupported transaction type: %s", tx.Type)
-	}
+		// Update receiver's balance
+		if err := s.walletService.UpdateBalanceOnly(ctx, tx.ReceiverID, tx.Amount); err != nil {
+			// Rollback sender's balance if receiver update fails
+			_ = s.walletService.UpdateBalanceOnly(ctx, tx.SenderID, tx.Amount)
+			return err
+		}
 
-	if err := s.db.Create(tx).Error; err != nil {
-		return nil, fmt.Errorf("failed to record transaction: %w", err)
+		// Create the transaction record
+		return dbTx.Create(tx).Error
+	})
+
+	if err != nil {
+		return nil, err
 	}
 
 	return tx, nil
@@ -122,6 +101,21 @@ func (s *service) CreateTransaction(ctx context.Context, tx *models.Transaction)
 	}
 
 	return tx, nil
+}
+
+func (s *service) validateTransaction(tx *models.Transaction) error {
+	if tx.Amount <= 0 {
+		return errors.New("amount must be greater than zero")
+	}
+	if tx.SenderID == 0 && tx.ReceiverID == 0 {
+		return errors.New("transaction must have at least one party")
+	}
+	// Risk assessment
+	riskScore := s.riskService.AssessTransaction(tx)
+	if riskScore > highRiskThreshold {
+		return ErrHighRiskTransaction
+	}
+	return nil
 }
 
 type RiskService struct{}

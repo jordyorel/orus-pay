@@ -61,9 +61,11 @@ func (s *service) GetUserReceiveQR(ctx context.Context, userID uint) (*models.QR
 		MaxUses:      limits.MaxUses,
 		DailyLimit:   &limits.DailyLimit,
 		MonthlyLimit: &limits.MonthlyLimit,
+		UserType:     user.Role, // Set the user type
 		Metadata: models.NewJSON(map[string]interface{}{
 			"qr_type":   "receive",
 			"user_id":   userID,
+			"user_type": user.Role,
 			"user_role": user.Role,
 		}),
 	}
@@ -76,16 +78,25 @@ func (s *service) GetUserReceiveQR(ctx context.Context, userID uint) (*models.QR
 }
 
 func (s *service) GetUserPaymentCodeQR(ctx context.Context, userID uint) (*models.QRCode, error) {
+	// Get user type first
+	user, err := repositories.GetUserByID(userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user: %w", err)
+	}
+
 	qr := &models.QRCode{
 		UserID:    userID,
 		Code:      utils.MustGenerateSecureCode(),
 		Type:      string(TypePaymentCode),
 		Status:    "active",
-		ExpiresAt: nil, // Remove expiration for static codes
-		MaxUses:   -1,  // Unlimited uses
+		ExpiresAt: nil,       // Static codes don't expire
+		MaxUses:   -1,        // Unlimited uses
+		UserType:  user.Role, // Set the user type
 		Metadata: models.NewJSON(map[string]interface{}{
-			"qr_type": "payment_code",
-			"user_id": userID,
+			"qr_type":   "payment_code",
+			"user_id":   userID,
+			"user_type": user.Role,
+			"user_role": user.Role,
 		}),
 	}
 
@@ -108,7 +119,7 @@ func (s *service) ProcessQRPayment(ctx context.Context, code string, amount floa
 		return nil, appErrors.ErrQRExpired
 	}
 
-	// Check scanner role
+	// Check scanner role and QR type validity
 	isMerchant := false
 	if meta, ok := metadata["scanner_role"].(string); ok && meta == "merchant" {
 		isMerchant = true
@@ -116,46 +127,36 @@ func (s *service) ProcessQRPayment(ctx context.Context, code string, amount floa
 
 	// Validate QR type based on scanner role
 	if isMerchant {
-		// Merchants can only scan customer payment codes
+		// Merchants should scan customer's payment code QR
 		if qr.Type != string(TypePaymentCode) {
-			return nil, fmt.Errorf("merchants can only scan payment code QRs")
+			return nil, fmt.Errorf("merchants can only scan customer payment code QRs")
 		}
-		// For merchant scanning customer payment code:
-		// Customer (QR owner) pays, merchant receives
-		// Create transaction
-		tx := &models.Transaction{
-			Type:        "QR_PAYMENT",
-			SenderID:    qr.UserID,
-			ReceiverID:  scannerID,
-			Amount:      amount,
-			Status:      "pending",
-			Description: description,
-			Metadata:    models.NewJSON(metadata),
-		}
-
-		// Use transaction service to process
-		return s.transactionSvc.ProcessTransaction(ctx, tx)
 	} else {
-		// Regular users can only scan receive QRs
+		// Regular users should scan receive QR codes
 		if qr.Type != string(TypeReceive) {
 			return nil, fmt.Errorf("users can only scan receive QRs")
 		}
-		// For user scanning another user/merchant receive QR:
-		// Scanner pays, QR owner receives
-		// Create transaction
-		tx := &models.Transaction{
-			Type:        "QR_PAYMENT",
-			SenderID:    scannerID,
-			ReceiverID:  qr.UserID,
-			Amount:      amount,
-			Status:      "pending",
-			Description: description,
-			Metadata:    models.NewJSON(metadata),
-		}
-
-		// Use transaction service to process
-		return s.transactionSvc.ProcessTransaction(ctx, tx)
 	}
+
+	// Create transaction record
+	tx := &models.Transaction{
+		Type:          getTransactionType(isMerchant),
+		SenderID:      getSenderID(isMerchant, qr.UserID, scannerID),
+		ReceiverID:    getReceiverID(isMerchant, qr.UserID, scannerID),
+		Amount:        amount,
+		Status:        "completed",
+		Description:   description,
+		TransactionID: fmt.Sprintf("QR-%d-%d", scannerID, time.Now().UnixNano()),
+		Reference:     fmt.Sprintf("QRP-%d-%d", scannerID, time.Now().UnixNano()),
+		PaymentType:   "qr_scan",
+		PaymentMethod: "wallet",
+		Category:      "Payment",
+		MerchantID:    getMerchantID(isMerchant, scannerID),
+		Metadata:      models.NewJSON(metadata),
+	}
+
+	// Use transaction service to handle the entire operation
+	return s.transactionSvc.ProcessTransaction(ctx, tx)
 }
 
 func (s *service) ValidateQRCode(ctx context.Context, code string, amount float64) (uint, error) {
@@ -173,4 +174,32 @@ func (s *service) ValidateQRCode(ctx context.Context, code string, amount float6
 
 	// Return the user ID associated with the QR code
 	return qrCode.UserID, nil
+}
+
+func getTransactionType(isMerchant bool) string {
+	if isMerchant {
+		return "merchant_scan"
+	}
+	return "QR_PAYMENT"
+}
+
+func getMerchantID(isMerchant bool, scannerID uint) *uint {
+	if isMerchant {
+		return &scannerID
+	}
+	return nil
+}
+
+func getSenderID(isMerchant bool, qrUserID, scannerID uint) uint {
+	if isMerchant {
+		return qrUserID
+	}
+	return scannerID
+}
+
+func getReceiverID(isMerchant bool, qrUserID, scannerID uint) uint {
+	if isMerchant {
+		return scannerID
+	}
+	return qrUserID
 }
