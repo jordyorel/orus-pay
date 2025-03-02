@@ -243,20 +243,6 @@ func (s *Service) ProcessQRPayment(ctx context.Context, merchantID uint, input Q
 	return s.processTransaction(tx)
 }
 
-func (s *Service) ProcessRefund(ctx context.Context, merchantID uint, input RefundInput) (*models.Transaction, error) {
-	tx := &models.Transaction{
-		Type:        models.TransactionTypeRefund,
-		SenderID:    merchantID,
-		Amount:      input.Amount,
-		Description: input.Reason,
-		Reference:   input.TransactionID,
-		Status:      "pending",
-		Currency:    "USD",
-	}
-
-	return s.processTransaction(tx)
-}
-
 func (s *Service) GenerateAPIKey(merchantID uint) (string, error) {
 	return repositories.GenerateMerchantAPIKey(merchantID)
 }

@@ -15,6 +15,7 @@ type MerchantRepository interface {
 	GetByUserID(userID uint) (*models.Merchant, error)
 	Create(merchant *models.Merchant) error
 	Update(merchant *models.Merchant) error
+	UpdateAPIKey(userID uint, apiKey string) error
 }
 
 type merchantRepository struct {
@@ -146,4 +147,10 @@ func (r *merchantRepository) Create(merchant *models.Merchant) error {
 
 func (r *merchantRepository) Update(merchant *models.Merchant) error {
 	return r.db.Save(merchant).Error
+}
+
+func (r *merchantRepository) UpdateAPIKey(userID uint, apiKey string) error {
+	return r.db.Model(&models.Merchant{}).
+		Where("user_id = ?", userID).
+		Update("api_key", apiKey).Error
 }

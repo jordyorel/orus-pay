@@ -18,15 +18,31 @@ const (
 type KeyType string
 
 const (
-	KeyID    KeyType = "id"
-	KeyEmail KeyType = "email"
-	KeyPhone KeyType = "phone"
-	KeyCode  KeyType = "code"
+	KeyID      KeyType = "id"
+	KeyEmail   KeyType = "email"
+	KeyPhone   KeyType = "phone"
+	KeyCode    KeyType = "code"
+	KeyBalance KeyType = "balance"
 )
 
 // GenerateKey creates a standardized cache key
 func GenerateKey(entity EntityType, keyType KeyType, value interface{}) string {
 	return fmt.Sprintf("%s:%s:%v", entity, keyType, value)
+}
+
+// GenerateWalletKey creates a cache key for a wallet
+func GenerateWalletKey(walletID uint) string {
+	return GenerateKey(EntityWallet, KeyID, walletID)
+}
+
+// GenerateWalletBalanceKey creates a cache key specifically for a wallet's balance
+func GenerateWalletBalanceKey(walletID uint) string {
+	return GenerateKey(EntityWallet, KeyBalance, walletID)
+}
+
+// GenerateUserWalletKey creates a cache key for a user's wallet
+func GenerateUserWalletKey(userID uint) string {
+	return fmt.Sprintf("%s:%s:%d:%s", EntityUser, KeyID, userID, EntityWallet)
 }
 
 // GenerateCompositeKey creates a cache key with multiple components
@@ -58,4 +74,20 @@ func ParseKey(key string) map[string]string {
 	}
 
 	return result
+}
+
+// InvalidateWalletCache invalidates all cache entries for a wallet
+func InvalidateWalletCache(walletID uint) []string {
+	keys := []string{
+		GenerateWalletKey(walletID),
+		GenerateWalletBalanceKey(walletID),
+	}
+	return keys
+}
+
+// InvalidateUserWalletCache invalidates all cache entries for a user's wallet
+func InvalidateUserWalletCache(userID uint) []string {
+	return []string{
+		GenerateUserWalletKey(userID),
+	}
 }

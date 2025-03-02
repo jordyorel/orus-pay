@@ -6,6 +6,7 @@ package main
 import (
 	"log"
 	"orus/internal/config"
+	"strconv"
 
 	// "orus/internal/handlers"
 	"orus/internal/repositories"
@@ -32,11 +33,50 @@ func main() {
 	// Initialize databases (PostgreSQL + Redis)
 	repositories.InitDB()
 
-	// Clear Redis cache on startup
-	if err := repositories.RedisClient.FlushAll(repositories.RedisCtx).Err(); err != nil {
-		log.Printf("⚠️ Failed to clear Redis cache on startup: %v", err)
+	sqlDB, err := repositories.DB.DB()
+	if err != nil {
+		log.Fatalf("Failed to get database instance: %v", err)
+	}
+
+	maxIdleConns, _ := strconv.Atoi(config.GetEnv("DB_MAX_IDLE_CONNS", "10"))
+	maxOpenConns, _ := strconv.Atoi(config.GetEnv("DB_MAX_OPEN_CONNS", "100"))
+	connMaxLifetime, _ := time.ParseDuration(config.GetEnv("DB_CONN_MAX_LIFETIME", "1h"))
+	connMaxIdleTime, _ := time.ParseDuration(config.GetEnv("DB_CONN_MAX_IDLE_TIME", "30m"))
+	if err != nil {
+		maxIdleConns = 10
+		log.Printf("Invalid DB_MAX_IDLE_CONNS, using default: %d", maxIdleConns)
+	}
+
+	sqlDB.SetMaxIdleConns(maxIdleConns)       // Maximum number of idle connections
+	sqlDB.SetMaxOpenConns(maxOpenConns)       // Maximum number of open connections
+	sqlDB.SetConnMaxLifetime(connMaxLifetime) // Maximum lifetime of a connection
+	sqlDB.SetConnMaxIdleTime(connMaxIdleTime) // Maximum idle time for a connection
+
+	// Add a periodic check of connection pool stats
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			stats := sqlDB.Stats()
+			log.Printf("DB Stats: Open=%d, Idle=%d, InUse=%d, WaitCount=%d, WaitDuration=%s",
+				stats.OpenConnections, stats.Idle, stats.InUse, stats.WaitCount, stats.WaitDuration)
+		}
+	}()
+
+	if err := sqlDB.Ping(); err != nil {
+		log.Fatalf("Failed to ping database: %v", err)
 	} else {
-		log.Println("✅ Redis cache cleared on startup")
+		log.Println("✅ Successfully connected to database with connection pooling")
+	}
+
+	// Clear Redis cache on startup
+	if repositories.RedisClient != nil {
+		status := repositories.RedisClient.FlushDB(repositories.RedisCtx)
+		if status.Err() != nil {
+			log.Printf("⚠️ Failed to flush Redis cache: %v", status.Err())
+		} else {
+			log.Println("✅ Redis cache flushed on startup")
+		}
 	}
 
 	defer func() {
@@ -76,7 +116,6 @@ func main() {
 		Format: "[${time}] ${status} - ${latency} ${method} ${path}\n",
 	}))
 
-	// Rate limiting setup remains the same
 	app.Use("/api/register", limiter.New(limiter.Config{
 		Max:        5,
 		Expiration: 1 * time.Minute,

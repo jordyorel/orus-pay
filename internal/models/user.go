@@ -23,8 +23,10 @@ type User struct {
 	TwoFactorEnabled      bool `gorm:"default:false"`
 	FailedLoginAttempts   int  `gorm:"default:0"`
 	AccountLockoutUntil   *time.Time
-	TokenVersion          int    `gorm:"default:1"`
-	MerchantProfileStatus string `gorm:"default:'not_applicable'"`
+	TokenVersion          int       `gorm:"default:1"`
+	MerchantProfileStatus string    `gorm:"default:'not_applicable'"`
+	Balance               float64   `gorm:"default:0"`
+	LastActiveAt          time.Time `gorm:"index"`
 }
 
 // CreateUserInput represents the data needed to create a new user

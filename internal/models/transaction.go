@@ -39,7 +39,7 @@ type Transaction struct {
 	CardID           *uint   // Optional card reference
 	QRCodeID         *string // Optional QR code reference
 	Category         string  `gorm:"type:varchar(50)"`
-	CreatedAt        time.Time
+	ProcessedAt      time.Time
 	UpdatedAt        time.Time
 }
 

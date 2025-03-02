@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"time"
 
+	"log"
+
 	"github.com/redis/go-redis/v9"
 )
 
@@ -75,8 +77,13 @@ func (r *RedisCacheRepository) GetWallet(ctx context.Context, userID uint) (*mod
 	key := fmt.Sprintf("wallet:%d", userID)
 	data, err := r.client.Get(ctx, key).Bytes()
 	if err != nil {
+		// Cache miss
+		LogCacheMiss(key)
 		return nil, err
 	}
+
+	// Cache hit
+	LogCacheHit(key)
 
 	var wallet models.Wallet
 	if err := json.Unmarshal(data, &wallet); err != nil {
@@ -91,7 +98,12 @@ func (r *RedisCacheRepository) SetWallet(ctx context.Context, userID uint, walle
 	if err != nil {
 		return err
 	}
-	return r.client.Set(ctx, key, data, DefaultExpiration).Err()
+
+	// Log cache set operation with expiration time
+	log.Printf("Cache SET: %s (expires in %s)", key, WalletExpiration)
+
+	// Use the shorter expiration time for wallets
+	return r.client.Set(ctx, key, data, WalletExpiration).Err()
 }
 
 func (r *RedisCacheRepository) DeleteWallet(ctx context.Context, userID uint) error {

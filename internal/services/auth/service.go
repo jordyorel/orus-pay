@@ -4,11 +4,12 @@ package auth
 
 import (
 	"errors"
-	"log"
 	"orus/internal/models"
 	"orus/internal/repositories"
 	"orus/internal/validation"
 	"time"
+
+	"log"
 
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
@@ -57,26 +58,53 @@ func NewService(userRepo repositories.UserRepository, jwtSecret, refreshSecret s
 
 func (s *service) Login(email, phone, password string) (*models.User, string, string, error) {
 	// Get user by email or phone
-	user, err := s.getUserByIdentifier(email, phone)
+	var user *models.User
+	var err error
+
+	if email != "" {
+		user, err = s.userRepo.GetByEmail(email)
+	} else {
+		user, err = s.userRepo.GetByPhone(phone)
+	}
+
 	if err != nil {
-		log.Printf("Login failed: User not found for identifier: %s", email+phone)
-		return nil, "", "", errors.New("invalid credentials")
+		return nil, "", "", err
 	}
 
 	// Verify password
 	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(password)); err != nil {
-		log.Printf("Login failed: Incorrect password for user ID: %d", user.ID)
 		return nil, "", "", errors.New("invalid credentials")
 	}
 
-	// Generate tokens
-	accessToken, refreshToken, err := s.generateTokens(user)
-	if err != nil {
-		log.Println("Error generating tokens:", err)
-		return nil, "", "", errors.New("error generating tokens")
+	// After successful login
+	log.Printf("Initial token version: %d", user.TokenVersion)
+	log.Printf("User ID before login: %d", user.ID)
+
+	if err := s.userRepo.IncrementTokenVersion(user.ID); err != nil {
+		return nil, "", "", err
 	}
 
-	return user, accessToken, refreshToken, nil
+	// Verify the increment
+	updatedUser, err := s.userRepo.GetByID(user.ID)
+	if err != nil {
+		return nil, "", "", err
+	}
+	log.Printf("New token version: %d", updatedUser.TokenVersion)
+	log.Printf("User ID after increment: %d", updatedUser.ID)
+
+	// Generate new tokens
+	accessToken, err := s.generateAccessToken(updatedUser)
+	if err != nil {
+		return nil, "", "", err
+	}
+	log.Printf("Generated token with version: %d for user ID: %d", updatedUser.TokenVersion, updatedUser.ID)
+
+	refreshToken, err := s.generateRefreshToken(updatedUser)
+	if err != nil {
+		return nil, "", "", err
+	}
+
+	return updatedUser, accessToken, refreshToken, nil
 }
 
 func (s *service) RefreshTokens(refreshToken string) (string, string, error) {
@@ -107,20 +135,7 @@ func (s *service) RefreshTokens(refreshToken string) (string, string, error) {
 }
 
 func (s *service) Logout(userID uint) error {
-	user, err := s.GetUserByID(userID)
-	if err != nil {
-		return err
-	}
-
-	// Increment token version
-	user.TokenVersion++
-
-	// Update user in database
-	if err := s.userRepo.Update(user); err != nil {
-		return err
-	}
-
-	return nil
+	return s.userRepo.IncrementTokenVersion(userID)
 }
 
 func (s *service) ChangePassword(userID uint, oldPassword, newPassword string) error {
@@ -152,16 +167,24 @@ func (s *service) ChangePassword(userID uint, oldPassword, newPassword string) e
 	return nil
 }
 
-func (s *service) getUserByIdentifier(email, phone string) (*models.User, error) {
-	if email != "" {
-		return s.userRepo.GetByEmail(email)
-	}
-	return s.userRepo.GetByPhone(phone)
-}
-
 func (s *service) generateTokens(user *models.User) (string, string, error) {
 	// Create access token with JWT_SECRET
-	accessToken := jwt.NewWithClaims(jwt.SigningMethodHS256, models.UserClaims{
+	accessToken, err := s.generateAccessToken(user)
+	if err != nil {
+		return "", "", err
+	}
+
+	// Create refresh token with REFRESH_SECRET
+	refreshToken, err := s.generateRefreshToken(user)
+	if err != nil {
+		return "", "", err
+	}
+
+	return accessToken, refreshToken, nil
+}
+
+func (s *service) generateAccessToken(user *models.User) (string, error) {
+	claims := &models.UserClaims{
 		UserID:       user.ID,
 		Email:        user.Email,
 		Role:         user.Role,
@@ -171,31 +194,22 @@ func (s *service) generateTokens(user *models.User) (string, string, error) {
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour * 24)),
 		},
-	})
-
-	// Sign access token with JWT_SECRET
-	accessTokenString, err := accessToken.SignedString([]byte(s.jwtSecret))
-	if err != nil {
-		return "", "", err
 	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString([]byte(s.jwtSecret))
+}
 
-	// Create refresh token with REFRESH_SECRET
-	refreshToken := jwt.NewWithClaims(jwt.SigningMethodHS256, models.UserClaims{
+func (s *service) generateRefreshToken(user *models.User) (string, error) {
+	claims := &models.UserClaims{
 		UserID:       user.ID,
 		TokenType:    "refresh",
 		TokenVersion: user.TokenVersion,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour * 24 * 7)),
 		},
-	})
-
-	// Sign refresh token with REFRESH_SECRET (not the fixed secret)
-	refreshTokenString, err := refreshToken.SignedString([]byte(s.refreshSecret))
-	if err != nil {
-		return "", "", err
 	}
-
-	return accessTokenString, refreshTokenString, nil
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString([]byte(s.refreshSecret))
 }
 
 func (s *service) GetUserByID(userID uint) (*models.User, error) {
@@ -208,9 +222,12 @@ func (s *service) GenerateTokens(user *models.User) (string, string, error) {
 }
 
 func (s *service) GetUserTokenVersion(userID uint) (int, error) {
+	log.Printf("Getting token version for user ID: %d", userID)
 	user, err := s.GetUserByID(userID)
 	if err != nil {
+		log.Printf("Error getting token version for user %d: %v", userID, err)
 		return 0, err
 	}
+	log.Printf("Retrieved token version %d for user %d", user.TokenVersion, userID)
 	return user.TokenVersion, nil
 }

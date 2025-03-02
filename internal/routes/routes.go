@@ -12,6 +12,7 @@ import (
 	"orus/internal/services/auth"
 	creditcard "orus/internal/services/credit-card"
 	"orus/internal/services/dashboard"
+	"orus/internal/services/dispute"
 	"orus/internal/services/merchant"
 	"orus/internal/services/payment"
 	qr "orus/internal/services/qr_code"
@@ -41,7 +42,7 @@ func SetupRoutes(app *fiber.App, db *gorm.DB) {
 	cardRepo := repositories.NewCreditCardRepository(repositories.DB)
 
 	// Initialize auth service and handler
-	jwtSecret := config.GetEnv("JWT_SECRET", "your-secret-key")
+	jwtSecret := config.GetEnv("JWT_SECRET", "orus")
 	refreshSecret := config.GetEnv("REFRESH_SECRET", "your-refresh-secret")
 	authService := auth.NewService(userRepo, jwtSecret, refreshSecret)
 	authHandler := handlers.NewAuthHandler(authService, refreshSecret)
@@ -83,6 +84,15 @@ func SetupRoutes(app *fiber.App, db *gorm.DB) {
 	)
 	dashboardHandler := handlers.NewDashboardHandler(dashboardService)
 
+	// Initialize dispute service and handler
+	disputeService := dispute.NewService(
+		repositories.NewDisputeRepository(db),
+		repositories.NewTransactionRepository(db),
+		repositories.NewUserRepository(db),
+		db,
+	)
+	disputeHandler := handlers.NewDisputeHandler(disputeService)
+
 	// Initialize handlers
 	paymentHandler := handlers.NewPaymentHandler(qrService, paymentService)
 	merchantHandler := handlers.NewMerchantHandler(
@@ -96,9 +106,28 @@ func SetupRoutes(app *fiber.App, db *gorm.DB) {
 
 	// Public routes
 	api := app.Group("/api")
+
+	// Add welcome route at the API root
+	api.Get("/", func(c *fiber.Ctx) error {
+		return c.JSON(fiber.Map{
+			"message": "Welcome to Orus API",
+			"version": "1.0.0",
+			"status":  "running",
+		})
+	})
+
 	api.Post("/register", userHandler.RegisterUser)
 	api.Post("/login", authHandler.LoginUser)
 	api.Post("/refresh", authHandler.RefreshToken)
+
+	// Also add a root welcome route
+	app.Get("/", func(c *fiber.Ctx) error {
+		return c.JSON(fiber.Map{
+			"message": "Welcome to Orus API",
+			"version": "1.0.0",
+			"docs":    "/api",
+		})
+	})
 
 	// Create middleware instance
 	authMiddleware := middleware.NewAuthMiddleware(authService)
@@ -110,10 +139,32 @@ func SetupRoutes(app *fiber.App, db *gorm.DB) {
 	setupUserRoutes(protected, paymentHandler, userHandler, cardHandler, authHandler)
 	setupMerchantRoutes(protected, merchantHandler, paymentHandler)
 	// setupEnterpriseRoutes(protected, enterpriseHandler)
-	setupAdminRoutes(app, jwtSecret)
+	setupAdminRoutes(app, authMiddleware)
+	setupDisputeRoutes(protected, disputeHandler)
 
 	// Add dashboard routes
 	addDashboardRoutes(app, dashboardHandler, authMiddleware.Handler)
+
+	// Add debug endpoint
+	app.Get("/api/debug/claims", func(c *fiber.Ctx) error {
+		claims, ok := c.Locals("claims").(*models.UserClaims)
+		if !ok {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error": "No claims found",
+			})
+		}
+
+		return c.JSON(fiber.Map{
+			"user_id":       claims.UserID,
+			"email":         claims.Email,
+			"role":          claims.Role,
+			"permissions":   claims.Permissions,
+			"token_version": claims.TokenVersion,
+		})
+	})
+
+	// Add temporary cache stats route
+	app.Get("/api/test/cache-stats", authMiddleware.Handler, handlers.CacheStats)
 }
 
 func setupUserRoutes(router fiber.Router, paymentHandler *handlers.PaymentHandler, userHandler *handlers.UserHandler, cardHandler *handlers.CreditCardHandler, authHandler *handlers.AuthHandler) {
@@ -163,15 +214,19 @@ func setupMerchantRoutes(router fiber.Router, h *handlers.MerchantHandler, payme
 	merchant.Get("/transactions", h.GetMerchantTransactions)
 }
 
-func setupAdminRoutes(app *fiber.App, jwtSecret string) {
-	// First apply auth middleware, then admin check
-	admin := app.Group("/api/admin", middleware.CreateAuthMiddleware(jwtSecret), middleware.AdminAuthMiddleware)
+func setupAdminRoutes(app *fiber.App, authMiddleware *middleware.AuthMiddleware) {
+	// Use the existing auth middleware instance
+	admin := app.Group("/api/admin", authMiddleware.Handler, middleware.AdminAuthMiddleware)
 
 	admin.Get("/transactions", middleware.HasPermission(models.PermissionReadAdmin), handlers.GetAllTransactions)
 	admin.Get("/users", middleware.HasPermission(models.PermissionReadAdmin), handlers.GetUsersPaginated)
 	admin.Delete("/users/:id", middleware.HasPermission(models.PermissionWriteAdmin), handlers.DeleteUser)
 	admin.Get("/wallets", middleware.HasPermission(models.PermissionWriteAdmin), handlers.GetAllWallets)
 	admin.Get("/credit-cards", middleware.HasPermission(models.PermissionWriteAdmin), handlers.GetAllCreditCards)
+
+	// Add cache stats endpoint to admin routes
+	admin.Get("/cache-stats", handlers.CacheStats)
+
 }
 
 func addDashboardRoutes(app *fiber.App, handler *handlers.DashboardHandler, authMiddleware fiber.Handler) {
@@ -184,4 +239,13 @@ func addDashboardRoutes(app *fiber.App, handler *handlers.DashboardHandler, auth
 	// Merchant dashboard routes
 	dashboard.Get("/merchant", middleware.HasPermission(models.PermissionMerchantRead), handler.GetMerchantDashboard)
 	dashboard.Get("/merchant/analytics", middleware.HasPermission(models.PermissionMerchantRead), handler.GetTransactionAnalytics)
+}
+
+func setupDisputeRoutes(router fiber.Router, disputeHandler *handlers.DisputeHandler) {
+	dispute := router.Group("/disputes")
+
+	dispute.Post("/", disputeHandler.FileDispute)                                                                       // Endpoint to file a dispute
+	dispute.Get("/", disputeHandler.GetDisputes)                                                                        // Endpoint to get all disputes for a merchant
+	dispute.Get("/merchant", disputeHandler.GetMerchantDisputes)                                                        // New endpoint to get merchant disputes
+	dispute.Post("/:id/refund", middleware.HasPermission(models.PermissionMerchantWrite), disputeHandler.RefundDispute) // New endpoint for processing refunds
 }

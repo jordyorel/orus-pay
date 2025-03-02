@@ -7,13 +7,10 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.2.1
 	github.com/joho/godotenv v1.5.1
 	github.com/redis/go-redis/v9 v9.7.0
-	github.com/stripe/stripe-go/v72 v72.122.0
 	golang.org/x/crypto v0.32.0
 	gorm.io/driver/postgres v1.5.11
 	gorm.io/gorm v1.25.12
 )
-
-require golang.org/x/net v0.34.0 // indirect
 
 require (
 	github.com/andybalholm/brotli v1.1.0 // indirect

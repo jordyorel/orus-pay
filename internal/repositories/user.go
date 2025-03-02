@@ -14,18 +14,6 @@ const (
 	userCacheExpiration = 24 * time.Hour
 )
 
-func getUserCacheKeyByID(id uint) string {
-	return fmt.Sprintf("user:id:%d", id)
-}
-
-func GetUserCacheKeyByEmail(email string) string {
-	return fmt.Sprintf("user:email:%s", email)
-}
-
-func GetUserCacheKeyByPhone(phone string) string {
-	return fmt.Sprintf("user:phone:%s", phone)
-}
-
 func GetUserByEmail(email string) (*models.User, error) {
 	// Try cache first
 	cacheKey := GetUserCacheKeyByEmail(email)
@@ -55,7 +43,7 @@ func GetUserByEmail(email string) (*models.User, error) {
 }
 
 func GetUserByID(userID uint) (*models.User, error) {
-	cacheKey := getUserCacheKeyByID(userID)
+	cacheKey := GetUserCacheKeyByID(userID)
 	cachedUser, err := cacheGetUser(cacheKey)
 	if err == nil {
 		log.Printf("Cache hit for user ID: %d", userID)
@@ -149,14 +137,6 @@ func UpdateUser(user *models.User) error {
 	return result.Error
 }
 
-func InvalidateUserCache(userID uint) {
-	keys := []string{
-		getUserCacheKeyByID(userID),
-		// Add other cache keys if needed
-	}
-	RedisClient.Del(RedisCtx, keys...)
-}
-
 func DeleteUserByID(userID string) error {
 	// Convert string ID to uint
 	id, err := strconv.ParseUint(userID, 10, 32)
@@ -190,7 +170,7 @@ func IncrementUserTokenVersion(userID uint) error {
 	}
 
 	// Invalidate all cache keys for the user
-	cacheKeyID := getUserCacheKeyByID(userID)
+	cacheKeyID := GetUserCacheKeyByID(userID)
 	cacheKeyEmail := GetUserCacheKeyByEmail(user.Email)
 	cacheKeyPhone := GetUserCacheKeyByPhone(user.Phone)
 	RedisClient.Del(RedisCtx, cacheKeyID, cacheKeyEmail, cacheKeyPhone)
@@ -214,7 +194,7 @@ func GetUserTransactionsPaginated(userID uint, limit, offset int) ([]models.Tran
 
 	// Get paginated transactions
 	if err := DB.Where("sender_id = ? OR receiver_id = ?", userID, userID).
-		Order("created_at DESC").
+		Order("transaction_id DESC").
 		Limit(limit).
 		Offset(offset).
 		Find(&transactions).Error; err != nil {
@@ -222,4 +202,18 @@ func GetUserTransactionsPaginated(userID uint, limit, offset int) ([]models.Tran
 	}
 
 	return transactions, total, nil
+}
+
+// Example implementation
+func (r *userRepository) GetBalance(userID uint) (float64, error) {
+	var user models.User
+	err := r.db.First(&user, userID).Error
+	if err != nil {
+		return 0, err
+	}
+	return user.Balance, nil
+}
+
+func (r *userRepository) UpdateBalance(userID uint, newBalance float64) error {
+	return r.db.Model(&models.User{}).Where("id = ?", userID).Update("balance", newBalance).Error
 }

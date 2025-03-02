@@ -48,6 +48,9 @@ func (h *AuthHandler) LoginUser(c *fiber.Ctx) error {
 		return utils.Unauthorized(c, "Invalid credentials")
 	}
 
+	// Add debug logging
+	log.Printf("User logged in - ID: %d, Role: %s, Phone: %s", user.ID, user.Role, user.Phone)
+
 	// Set auth cookies
 	h.setAuthCookies(c, accessToken, refreshToken)
 
@@ -58,6 +61,7 @@ func (h *AuthHandler) LoginUser(c *fiber.Ctx) error {
 		"user": fiber.Map{
 			"id":          user.ID,
 			"email":       user.Email,
+			"phone":       user.Phone,
 			"role":        user.Role,
 			"permissions": models.GetDefaultPermissions(user.Role),
 		},
@@ -108,13 +112,28 @@ func (h *AuthHandler) LogoutUser(c *fiber.Ctx) error {
 		return utils.Unauthorized(c, "Invalid claims")
 	}
 
+	// Increment token version to invalidate all existing tokens
 	if err := h.authService.Logout(claims.UserID); err != nil {
-		log.Printf("Logout failed for user %d: %v", claims.UserID, err)
 		return utils.InternalError(c, "Failed to logout")
 	}
 
-	// Clear auth cookies
-	h.clearAuthCookies(c)
+	// Clear cookies
+	c.Cookie(&fiber.Cookie{
+		Name:     "access_token",
+		Value:    "",
+		Expires:  time.Now().Add(-time.Hour),
+		HTTPOnly: true,
+		Secure:   config.IsProduction(),
+		Path:     "/",
+	})
+	c.Cookie(&fiber.Cookie{
+		Name:     "refresh_token",
+		Value:    "",
+		Expires:  time.Now().Add(-time.Hour),
+		HTTPOnly: true,
+		Secure:   config.IsProduction(),
+		Path:     "/",
+	})
 
 	return utils.Success(c, fiber.Map{
 		"message": "Successfully logged out",
@@ -168,27 +187,5 @@ func (h *AuthHandler) setAuthCookies(c *fiber.Ctx, accessToken, refreshToken str
 		Path:     "/",
 		SameSite: "Strict",
 		MaxAge:   7 * 24 * 60 * 60, // 7 days
-	})
-}
-
-func (h *AuthHandler) clearAuthCookies(c *fiber.Ctx) {
-	c.Cookie(&fiber.Cookie{
-		Name:     "access_token",
-		Value:    "",
-		Expires:  time.Now().Add(-time.Hour),
-		HTTPOnly: true,
-		Secure:   config.IsProduction(),
-		Path:     "/",
-		SameSite: "Lax",
-	})
-
-	c.Cookie(&fiber.Cookie{
-		Name:     "refresh_token",
-		Value:    "",
-		Expires:  time.Now().Add(-time.Hour),
-		HTTPOnly: true,
-		Secure:   config.IsProduction(),
-		Path:     "/",
-		SameSite: "Lax",
 	})
 }

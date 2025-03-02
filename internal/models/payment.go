@@ -18,10 +18,10 @@ type PaymentRequest struct {
 
 // QRPaymentRequest represents a QR code payment request
 type QRPaymentRequest struct {
-	QRCode      string                 `json:"qr_code"`
-	Amount      float64                `json:"amount"`
-	Description string                 `json:"description"`
-	Metadata    map[string]interface{} `json:"metadata"`
+	QRCode      string         `json:"qr_code"`
+	Amount      float64        `json:"amount"`
+	Description string         `json:"description"`
+	Metadata    map[string]any `json:"metadata"`
 }
 
 const (

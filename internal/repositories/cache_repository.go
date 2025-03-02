@@ -23,5 +23,10 @@ type CacheRepository interface {
 	DeleteWallet(ctx context.Context, userID uint) error
 }
 
-// Default cache expiration time
-const DefaultExpiration = 24 * time.Hour
+// Update the constants section
+const (
+	DefaultExpiration    = 24 * time.Hour
+	WalletExpiration     = 15 * time.Minute // Shorter expiration for wallets
+	UserExpiration       = 1 * time.Hour    // Medium expiration for users
+	StaticDataExpiration = 24 * time.Hour   // Longer for static data
+)

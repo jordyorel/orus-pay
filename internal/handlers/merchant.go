@@ -3,6 +3,7 @@ package handlers
 import (
 	"errors"
 	"fmt"
+	"log"
 	"orus/internal/models"
 	"orus/internal/repositories"
 	"orus/internal/services/merchant"
@@ -152,6 +153,9 @@ func (h *MerchantHandler) ProcessDirectCharge(c *fiber.Ctx) error {
 
 func (h *MerchantHandler) UpdateMerchantProfile(c *fiber.Ctx) error {
 	claims := c.Locals("claims").(*models.UserClaims)
+
+	log.Printf("Attempting to retrieve merchant for userID: %d", claims.UserID)
+
 	var input struct {
 		BusinessInfo struct {
 			Name               string `json:"name"`
@@ -184,13 +188,13 @@ func (h *MerchantHandler) UpdateMerchantProfile(c *fiber.Ctx) error {
 		return response.BadRequest(c, "Invalid request body")
 	}
 
-	// Get existing merchant
+	// Get existing merchant using the repository directly
 	merchant, err := repositories.GetMerchantByUserID(claims.UserID)
 	if err != nil {
 		return response.Error(c, fiber.StatusNotFound, "Merchant profile not found")
 	}
 
-	// Update basic fields
+	// Update fields
 	merchant.BusinessName = input.BusinessInfo.Name
 	merchant.BusinessType = input.BusinessInfo.Type
 
@@ -212,7 +216,7 @@ func (h *MerchantHandler) UpdateMerchantProfile(c *fiber.Ctx) error {
 		"business_hours":  input.BusinessHours,
 	})
 
-	// Use DB.Save instead of repositories.UpdateMerchant to ensure we're updating not creating
+	// Save updated merchant
 	if err := repositories.DB.Save(merchant).Error; err != nil {
 		return response.Error(c, fiber.StatusInternalServerError, "Failed to update merchant profile")
 	}
@@ -237,10 +241,12 @@ func (h *MerchantHandler) SetWebhookURL(c *fiber.Ctx) error {
 		WebhookURL string `json:"webhook_url"`
 	}
 
+	// Parse the request body
 	if err := c.BodyParser(&input); err != nil {
 		return response.BadRequest(c, "Invalid request body")
 	}
 
+	// Call the service to set the webhook URL
 	if err := h.merchantService.SetWebhookURL(claims.UserID, input.WebhookURL); err != nil {
 		return response.Error(c, fiber.StatusInternalServerError, "Failed to set webhook URL")
 	}

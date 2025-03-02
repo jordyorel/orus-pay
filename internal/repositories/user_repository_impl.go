@@ -3,6 +3,8 @@ package repositories
 import (
 	"orus/internal/models"
 
+	"log"
+
 	"gorm.io/gorm"
 )
 
@@ -81,15 +83,19 @@ func (r *userRepository) Delete(id uint) error {
 }
 
 func (r *userRepository) IncrementTokenVersion(userID uint) error {
-	result := r.db.Model(&models.User{}).
-		Where("id = ?", userID).
-		UpdateColumn("token_version", gorm.Expr("token_version + ?", 1))
-	if result.Error != nil {
-		return ErrDatabaseOperation
+	// Update token version in database
+	if err := r.db.Model(&models.User{}).Where("id = ?", userID).
+		UpdateColumn("token_version", gorm.Expr("token_version + 1")).Error; err != nil {
+		return err
 	}
-	if result.RowsAffected == 0 {
-		return ErrUserNotFound
+
+	// Add debug logging
+	log.Printf("Invalidating cache for user ID: %d", userID)
+	if err := InvalidateUserCache(userID); err != nil {
+		log.Printf("Cache invalidation error: %v", err)
 	}
+
+	log.Printf("Incremented and invalidated cache for user ID: %d", userID)
 	return nil
 }
 

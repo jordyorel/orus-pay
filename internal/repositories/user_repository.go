@@ -44,6 +44,9 @@ type UserRepository interface {
 
 	// UpdateStatus updates the user's status
 	UpdateStatus(userID uint, status string) error
+
+	GetBalance(userID uint) (float64, error)
+	UpdateBalance(userID uint, newBalance float64) error
 }
 
 // Implementation will be in user_repository_impl.go

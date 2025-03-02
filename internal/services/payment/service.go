@@ -28,13 +28,15 @@ func NewService(
 	}
 }
 
-// SendMoney handles P2P transfers between users
+// SendMoney handles P2P transfers between users with robust wallet lookup
 func (s *service) SendMoney(
 	ctx context.Context,
 	senderID, receiverID uint,
 	amount float64,
 	description string,
 ) (*models.Transaction, error) {
+	fmt.Printf("SendMoney - From: %d, To: %d, Amount: %.2f\n", senderID, receiverID, amount)
+
 	// Validate the transfer
 	if senderID == receiverID {
 		return nil, errors.New("cannot transfer to self")
@@ -44,23 +46,28 @@ func (s *service) SendMoney(
 		return nil, errors.New("amount must be greater than zero")
 	}
 
-	// Validate sender has sufficient balance
-	if err := s.walletService.ValidateBalance(ctx, senderID, amount); err != nil {
-		return nil, fmt.Errorf("insufficient balance: %w", err)
-	}
-
-	// Create transaction record
+	// Create transaction with unique ID
 	tx := &models.Transaction{
-		Type:        "transfer",
-		SenderID:    senderID,
-		ReceiverID:  receiverID,
-		Amount:      amount,
-		Description: description,
-		Status:      "pending",
+		Type:          "transfer",
+		SenderID:      senderID,
+		ReceiverID:    receiverID,
+		Amount:        amount,
+		Description:   description,
+		Status:        "pending",
+		TransactionID: fmt.Sprintf("TRF-%d-%d-%d", senderID, receiverID, time.Now().UnixNano()),
 	}
 
 	// Process the transaction
-	return s.transactionService.ProcessTransaction(ctx, tx)
+	fmt.Printf("Processing transaction - Type: transfer, From: %d, To: %d, Amount: %.2f\n",
+		senderID, receiverID, amount)
+	transaction, err := s.transactionService.ProcessTransaction(ctx, tx)
+	if err != nil {
+		fmt.Printf("Transaction processing error: %v\n", err)
+		return nil, fmt.Errorf("transaction processing error: %w", err)
+	}
+
+	fmt.Printf("Transaction successful - ID: %s\n", transaction.TransactionID)
+	return transaction, nil
 }
 
 // ProcessQRPayment handles payments via QR code

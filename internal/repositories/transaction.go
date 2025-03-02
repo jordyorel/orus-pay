@@ -13,7 +13,7 @@ import (
 // Add these methods to your existing TransactionRepository interface
 type TransactionRepository interface {
 	// ... existing methods ...
-
+	CreateTransaction(tx *models.Transaction) error
 	// Dashboard-specific methods
 	GetTransactionStats(userID uint) (count int, volume float64, err error)
 	GetLastTransaction(userID uint) (*models.Transaction, error)
@@ -25,6 +25,8 @@ type TransactionRepository interface {
 	GetVolumeOverTime(userID uint, startDate, endDate time.Time) (map[string]float64, error)
 	GetTransactionCountByType(userID uint, startDate, endDate time.Time) (map[string]int, error)
 	GetMerchantTransactions(merchantID uint, limit, offset int) ([]models.Transaction, int64, error)
+	FindByID(id uint) (*models.Transaction, error)
+	Update(transaction *models.Transaction) error
 }
 
 func CreateTransaction(tx *models.Transaction) error {
@@ -44,7 +46,13 @@ func UpdateTransaction(tx *models.Transaction) error {
 // Get all transactions for admin with pagination
 func GetTransactions(limit int, offset int) ([]models.Transaction, error) {
 	var transactions []models.Transaction
-	result := DB.Limit(limit).Offset(offset).Order("created_at DESC").Find(&transactions)
+
+	// Try ordering by a date column that exists in your table
+	// Common options might be: transaction_date, timestamp, processed_at, etc.
+	result := DB.Limit(limit).Offset(offset).
+		Order("transaction_id DESC"). // Transaction IDs often contain timestamps
+		Find(&transactions)
+
 	return transactions, result.Error
 }
 
@@ -52,7 +60,9 @@ func GetTransactions(limit int, offset int) ([]models.Transaction, error) {
 func GetUserTransactions(userID uint, limit int, offset int) ([]models.Transaction, error) {
 	var transactions []models.Transaction
 	result := DB.Where("sender_id = ? OR receiver_id = ?", userID, userID).
-		Limit(limit).Offset(offset).Order("created_at DESC").Find(&transactions)
+		Limit(limit).Offset(offset).
+		Order("transaction_id DESC"). // Changed from "created_at DESC"
+		Find(&transactions)
 	return transactions, result.Error
 }
 
@@ -126,4 +136,24 @@ func ProcessTransaction(senderID uint, receiverID uint, amount float64, qrCodeID
 func InvalidateWalletCache(userID uint) {
 	cacheKey := getWalletCacheKeyByUserID(userID)
 	RedisClient.Del(RedisCtx, cacheKey)
+}
+
+// transactionRepository struct
+
+// FindByID retrieves a transaction by its ID
+func (r *transactionRepository) FindByID(id uint) (*models.Transaction, error) {
+	var transaction models.Transaction
+	err := r.db.First(&transaction, id).Error
+	if err != nil {
+		return nil, err
+	}
+	return &transaction, nil
+}
+
+func (r *transactionRepository) Create(transaction *models.Transaction) error {
+	return r.db.Create(transaction).Error
+}
+
+func (r *transactionRepository) Update(transaction *models.Transaction) error {
+	return r.db.Save(transaction).Error
 }

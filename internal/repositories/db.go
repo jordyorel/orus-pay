@@ -19,6 +19,21 @@ import (
 // It provides access to the underlying database connection.
 var DB *gorm.DB
 
+// DBConfig holds database connection pool configuration
+type DBConfig struct {
+	MaxIdleConns    int
+	MaxOpenConns    int
+	ConnMaxLifetime time.Duration
+	ConnMaxIdleTime time.Duration
+}
+
+var dbConfig = DBConfig{
+	MaxIdleConns:    10,
+	MaxOpenConns:    100,
+	ConnMaxLifetime: time.Hour,
+	ConnMaxIdleTime: time.Minute * 30,
+}
+
 // InitDB initializes the database connection.
 // It sets up the connection pool, performs migrations,
 // and configures the database with proper settings.
@@ -36,6 +51,7 @@ func InitDB() error {
 		&models.KYCVerification{},
 		&models.Enterprise{}, // Consolidated enterprise model
 		&models.QRCode{},
+		&models.Dispute{},
 	)
 
 	if err != nil {
@@ -88,11 +104,11 @@ func initPostgres() {
 		log.Fatal("Failed to get database instance:", err)
 	}
 
-	// Connection pooling configuration
-	sqlDB.SetMaxIdleConns(10)
-	sqlDB.SetMaxOpenConns(100)
-	sqlDB.SetConnMaxLifetime(30 * time.Minute)
-	sqlDB.SetConnMaxIdleTime(10 * time.Minute)
+	// Apply the configuration from main.go
+	sqlDB.SetMaxIdleConns(dbConfig.MaxIdleConns)
+	sqlDB.SetMaxOpenConns(dbConfig.MaxOpenConns)
+	sqlDB.SetConnMaxLifetime(dbConfig.ConnMaxLifetime)
+	sqlDB.SetConnMaxIdleTime(dbConfig.ConnMaxIdleTime)
 
 	// Schema setup
 	db.Exec("CREATE SCHEMA IF NOT EXISTS public;")
@@ -101,8 +117,6 @@ func initPostgres() {
 	db.Exec("SET search_path TO public;")
 
 	// Configure GORM logger to ignore "record not found" errors
-	db.Logger = db.Logger.LogMode(logger.Silent) // Or use a custom logger configuration:
-
 	newLogger := logger.New(
 		log.New(os.Stdout, "\r\n", log.LstdFlags),
 		logger.Config{

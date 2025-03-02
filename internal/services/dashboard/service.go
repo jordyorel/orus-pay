@@ -94,7 +94,7 @@ func (s *service) GetMerchantDashboard(ctx context.Context, merchantID uint) (*M
 
 	// Get total stats
 	err := s.db.Model(&models.Transaction{}).
-		Where("merchant_id = ? AND status = ?", merchantID, "completed").
+		Where("receiver_id = ? AND status = ?", merchantID, "completed").
 		Select("COUNT(*) as total_transactions, COALESCE(SUM(amount), 0) as total_amount").
 		Row().Scan(&dashboard.TotalTransactions, &dashboard.TotalAmount)
 	if err != nil {
@@ -103,7 +103,7 @@ func (s *service) GetMerchantDashboard(ctx context.Context, merchantID uint) (*M
 
 	// Get daily stats
 	err = s.db.Model(&models.Transaction{}).
-		Where("merchant_id = ? AND status = ? AND created_at >= ?",
+		Where("receiver_id = ? AND status = ? AND updated_at >= ?",
 			merchantID, "completed", startOfDay).
 		Select("COUNT(*) as daily_transactions, COALESCE(SUM(amount), 0) as daily_amount").
 		Row().Scan(&dashboard.DailyTransactions, &dashboard.DailyAmount)
@@ -113,7 +113,7 @@ func (s *service) GetMerchantDashboard(ctx context.Context, merchantID uint) (*M
 
 	// Get monthly stats
 	err = s.db.Model(&models.Transaction{}).
-		Where("merchant_id = ? AND status = ? AND created_at >= ?",
+		Where("receiver_id = ? AND status = ? AND updated_at >= ?",
 			merchantID, "completed", startOfMonth).
 		Select("COUNT(*) as monthly_transactions, COALESCE(SUM(amount), 0) as monthly_amount").
 		Row().Scan(&dashboard.MonthlyTransactions, &dashboard.MonthlyAmount)
@@ -122,8 +122,8 @@ func (s *service) GetMerchantDashboard(ctx context.Context, merchantID uint) (*M
 	}
 
 	// Get recent transactions
-	err = s.db.Where("merchant_id = ? AND status = ?", merchantID, "completed").
-		Order("created_at DESC").
+	err = s.db.Where("receiver_id = ? AND status = ?", merchantID, "completed").
+		Order("updated_at DESC").
 		Limit(10).
 		Find(&dashboard.RecentTransactions).Error
 	if err != nil {
@@ -133,7 +133,7 @@ func (s *service) GetMerchantDashboard(ctx context.Context, merchantID uint) (*M
 	return &dashboard, nil
 }
 
-func (s *service) getBasicStats(ctx context.Context, userID uint) (*models.DashboardStats, error) {
+func (s *service) getBasicStats(_ context.Context, userID uint) (*models.DashboardStats, error) {
 	// Get transaction count and volume
 	count, volume, err := s.transactionRepo.GetTransactionStats(userID)
 	if err != nil {
@@ -156,7 +156,7 @@ func (s *service) getBasicStats(ctx context.Context, userID uint) (*models.Dashb
 		TotalTransactions:        count,
 		TotalVolume:              volume,
 		AverageTransactionAmount: volume / float64(count),
-		LastTransactionDate:      &lastTx.CreatedAt,
+		LastTransactionDate:      &lastTx.ProcessedAt,
 		CurrentBalance:           wallet.Balance,
 		PendingTransactions:      0, // TODO: Implement pending transactions count
 	}, nil
@@ -165,10 +165,9 @@ func (s *service) getBasicStats(ctx context.Context, userID uint) (*models.Dashb
 func (s *service) GetTransactionAnalytics(ctx context.Context, userID uint, startDate, endDate time.Time) (map[string]interface{}, error) {
 	// Check if user is a merchant
 	merchant, err := s.merchantRepo.GetByUserID(userID)
-	fmt.Printf("Looking up merchant for userID %d: %v, err: %v\n", userID, merchant, err)
 	if err == nil && merchant != nil {
 		// This is a merchant, get merchant-specific analytics
-		fmt.Printf("Getting merchant analytics for merchantID %d\n", merchant.ID)
+		fmt.Printf("Getting merchant analytics for userID %d (merchantID %d)\n", userID, merchant.ID)
 		return s.getMerchantAnalytics(merchant.ID, startDate, endDate)
 	}
 
@@ -192,86 +191,119 @@ func (s *service) GetTransactionAnalytics(ctx context.Context, userID uint, star
 func (s *service) getMerchantAnalytics(merchantID uint, startDate, endDate time.Time) (map[string]interface{}, error) {
 	fmt.Printf("Querying transactions for merchantID %d between %v and %v\n", merchantID, startDate, endDate)
 
-	// Get daily transaction volumes
-	dailyVolumes, err := s.db.Model(&models.Transaction{}).
-		Select("DATE(created_at) as date, COUNT(*) as count, SUM(amount) as volume").
-		Where("merchant_id = ? AND status = ? AND created_at BETWEEN ? AND ?",
-			merchantID, "completed", startDate, endDate).
-		Group("DATE(created_at)").
-		Order("date").
-		Rows()
+	// Debug query parameters
+	fmt.Printf("Query parameters - MerchantID: %d, Status: completed, Start: %v, End: %v\n",
+		merchantID, startDate, endDate)
+
+	// First, let's check if we can find any transactions at all for this merchant
+	var totalTx int64
+	err := s.db.Model(&models.Transaction{}).
+		Where("merchant_id = ?", merchantID).
+		Count(&totalTx).Error
 	if err != nil {
+		return nil, fmt.Errorf("failed to count total transactions: %w", err)
+	}
+	fmt.Printf("Total transactions found for merchant (without filters): %d\n", totalTx)
+
+	// Get daily volumes with more detailed logging
+	volumeOverTime := make(map[string]float64)
+	var dailyStats []struct {
+		Date   string
+		Count  int
+		Volume float64
+	}
+
+	err = s.db.Model(&models.Transaction{}).
+		Select("DATE(processed_at)::text as date, COUNT(*) as count, COALESCE(SUM(amount), 0) as volume").
+		Where("merchant_id = ? AND status = ? AND processed_at >= ? AND processed_at <= ?",
+			merchantID, "completed", startDate, endDate).
+		Group("DATE(processed_at)").
+		Order("date").
+		Find(&dailyStats).Error
+
+	if err != nil {
+		fmt.Printf("Error getting daily volumes: %v\n", err)
 		return nil, fmt.Errorf("failed to get daily volumes: %w", err)
 	}
-	defer dailyVolumes.Close()
 
-	volumeOverTime := make(map[string]float64)
-	for dailyVolumes.Next() {
-		var date string
-		var count int
-		var volume float64
-		if err := dailyVolumes.Scan(&date, &count, &volume); err != nil {
-			return nil, err
-		}
-		volumeOverTime[date] = volume
+	for _, stat := range dailyStats {
+		volumeOverTime[stat.Date] = stat.Volume
+		fmt.Printf("Daily stat - Date: %s, Count: %d, Volume: %.2f\n",
+			stat.Date, stat.Count, stat.Volume)
 	}
 
-	// Get transaction counts by payment method
-	var countByType = make(map[string]int64)
-	rows, err := s.db.Model(&models.Transaction{}).
-		Select("payment_method, COUNT(*) as count").
-		Where("merchant_id = ? AND status = ? AND created_at BETWEEN ? AND ?",
+	// Get payment method counts with debugging
+	countByType := make(map[string]int64)
+	var methodStats []struct {
+		Method string
+		Count  int64
+	}
+
+	err = s.db.Model(&models.Transaction{}).
+		Select("COALESCE(payment_method, 'unknown') as method, COUNT(*) as count").
+		Where("merchant_id = ? AND status = ? AND processed_at >= ? AND processed_at <= ?",
 			merchantID, "completed", startDate, endDate).
 		Group("payment_method").
-		Rows()
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+		Find(&methodStats).Error
 
-	for rows.Next() {
-		var paymentMethod string
-		var count int64
-		if err := rows.Scan(&paymentMethod, &count); err != nil {
-			return nil, err
-		}
-		countByType[paymentMethod] = count
+	if err != nil {
+		fmt.Printf("Error getting payment method counts: %v\n", err)
+		return nil, fmt.Errorf("failed to get payment method counts: %w", err)
 	}
 
-	// Get summary stats
-	var totalVolume, avgTransaction float64
+	for _, stat := range methodStats {
+		countByType[stat.Method] = stat.Count
+		fmt.Printf("Payment method stat - Method: %s, Count: %d\n",
+			stat.Method, stat.Count)
+	}
 
-	err = s.db.Model(&models.Transaction{}).
-		Where("merchant_id = ? AND status = ? AND created_at BETWEEN ? AND ?",
-			merchantID, "completed", startDate, endDate).
-		Select("COALESCE(SUM(amount), 0)").
-		Row().Scan(&totalVolume)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get total volume: %w", err)
+	// Get summary stats with more detailed query
+	var summary struct {
+		TotalVolume        float64
+		AverageTransaction float64
+		TotalCount         int64
 	}
 
 	err = s.db.Model(&models.Transaction{}).
-		Where("merchant_id = ? AND status = ? AND created_at BETWEEN ? AND ?",
+		Where("merchant_id = ? AND status = ? AND processed_at >= ? AND processed_at <= ?",
 			merchantID, "completed", startDate, endDate).
-		Select("COALESCE(AVG(amount), 0)").
-		Row().Scan(&avgTransaction)
+		Select(`
+			COALESCE(SUM(amount), 0) as total_volume,
+			CASE 
+				WHEN COUNT(*) > 0 THEN COALESCE(SUM(amount), 0) / COUNT(*)
+				ELSE 0
+			END as average_transaction,
+			COUNT(*) as total_count
+		`).
+		Scan(&summary).Error
+
 	if err != nil {
-		return nil, fmt.Errorf("failed to get average transaction: %w", err)
+		fmt.Printf("Error getting summary stats: %v\n", err)
+		return nil, fmt.Errorf("failed to get summary stats: %w", err)
 	}
 
-	// Debug: Check if we have any transactions at all
-	var totalCount int64
-	s.db.Model(&models.Transaction{}).
-		Where("merchant_id = ?", merchantID).
-		Count(&totalCount)
-	fmt.Printf("Total transactions found for merchantID %d: %d\n", merchantID, totalCount)
+	// Debug summary results
+	fmt.Printf("Summary stats for merchant %d:\n", merchantID)
+	fmt.Printf("- Total volume: %.2f\n", summary.TotalVolume)
+	fmt.Printf("- Average transaction: %.2f\n", summary.AverageTransaction)
+	fmt.Printf("- Total count: %d\n", summary.TotalCount)
+	fmt.Printf("- Volume over time entries: %d\n", len(volumeOverTime))
+	fmt.Printf("- Payment methods found: %d\n", len(countByType))
+
+	// Check if we have any data
+	if summary.TotalCount == 0 {
+		fmt.Printf("WARNING: No transactions found for merchant %d in date range\n", merchantID)
+		// Double check the date range
+		fmt.Printf("Date range check - Start: %v, End: %v\n", startDate, endDate)
+	}
 
 	return map[string]interface{}{
 		"volume_over_time": volumeOverTime,
 		"count_by_type":    countByType,
 		"summary": map[string]interface{}{
-			"total_volume":        totalVolume,
-			"average_transaction": avgTransaction,
+			"total_volume":        summary.TotalVolume,
+			"average_transaction": summary.AverageTransaction,
+			"total_count":         summary.TotalCount,
 		},
 	}, nil
 }

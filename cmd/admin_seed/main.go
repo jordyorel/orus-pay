@@ -66,11 +66,19 @@ func main() {
 		log.Fatal("Failed to create admin user:", err)
 	}
 
+	log.Printf("Admin user created with ID: %d", adminUser.ID)
+
 	if repositories.RedisClient != nil {
+		if err := repositories.InvalidateUserCache(adminUser.ID); err != nil {
+			log.Printf("Warning: Failed to invalidate admin user cache: %v", err)
+		}
+
 		repositories.RedisClient.Del(repositories.RedisCtx,
 			repositories.GetUserCacheKeyByEmail(adminEmail),
 			repositories.GetUserCacheKeyByPhone(adminPhone),
 		)
+
+		log.Println("Admin user cache invalidated")
 	}
 
 	log.Println("✅ Admin account created successfully!")

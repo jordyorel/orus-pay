@@ -25,6 +25,7 @@ type Merchant struct {
 	Metadata                JSON `gorm:"type:jsonb"`
 	CreatedAt               time.Time
 	UpdatedAt               time.Time
+	APIKey                  string `gorm:"column:api_key"`
 }
 
 type MerchantBankAccount struct {
