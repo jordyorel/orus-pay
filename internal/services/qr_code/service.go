@@ -8,6 +8,7 @@ import (
 	appErrors "orus/internal/errors"
 	"orus/internal/models"
 	"orus/internal/repositories"
+	"orus/internal/repositories/cache"
 	"orus/internal/services/transaction"
 	"orus/internal/services/wallet"
 	"orus/internal/utils"
@@ -18,19 +19,22 @@ import (
 
 type service struct {
 	db             *gorm.DB
-	cache          repositories.CacheRepository
+	repo           repositories.QRCodeRepository
+	cache          *cache.CacheService
 	transactionSvc transaction.Service
 	walletSvc      wallet.Service
 }
 
 func NewService(
 	db *gorm.DB,
-	cache repositories.CacheRepository,
+	repo repositories.QRCodeRepository,
+	cache *cache.CacheService,
 	txSvc transaction.Service,
 	walletSvc wallet.Service,
 ) Service {
 	return &service{
 		db:             db,
+		repo:           repo,
 		cache:          cache,
 		transactionSvc: txSvc,
 		walletSvc:      walletSvc,
@@ -202,4 +206,8 @@ func getReceiverID(isMerchant bool, qrUserID, scannerID uint) uint {
 		return scannerID
 	}
 	return qrUserID
+}
+
+func (s *service) GetUserQRCodes(ctx context.Context, userID uint) ([]*models.QRCode, error) {
+	return s.repo.GetQRCodesByUserID(ctx, userID)
 }

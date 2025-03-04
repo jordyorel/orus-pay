@@ -1,13 +1,12 @@
 package repositories
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"orus/internal/models"
 	"strconv"
 	"time"
-
-	"github.com/redis/go-redis/v9"
 )
 
 const (
@@ -16,68 +15,47 @@ const (
 
 func GetUserByEmail(email string) (*models.User, error) {
 	// Try cache first
-	cacheKey := GetUserCacheKeyByEmail(email)
-	cachedUser, err := cacheGetUser(cacheKey)
-	if err == nil {
+	key := CacheService.GenerateKey("user", "email", email)
+	var cachedUser models.User
+	if found, _ := CacheService.Get(context.Background(), key, &cachedUser); found {
 		log.Printf("Cache hit for user email: %s", email)
-		return cachedUser, nil
+		return &cachedUser, nil
 	}
-	if err != redis.Nil {
-		log.Printf("Cache error for email %s: %v", email, err)
-	}
-
-	// Cache miss, query database
-	var user models.User
-	if err := DB.Where("email = ?", email).First(&user).Error; err != nil {
+	if err := DB.Where("email = ?", email).First(&cachedUser).Error; err != nil {
 		return nil, err
 	}
 
-	// Update cache async
-	go func() {
-		if err := cacheSetUser(cacheKey, &user, userCacheExpiration); err != nil {
-			log.Printf("Failed to cache user %s: %v", email, err)
-		}
-	}()
+	// Cache result
+	CacheService.SetWithTTL(context.Background(), key, cachedUser, 24*time.Hour)
 
-	return &user, nil
+	return &cachedUser, nil
 }
 
 func GetUserByID(userID uint) (*models.User, error) {
-	cacheKey := GetUserCacheKeyByID(userID)
-	cachedUser, err := cacheGetUser(cacheKey)
-	if err == nil {
+	key := CacheService.GenerateKey("user", "id", strconv.FormatUint(uint64(userID), 10))
+	var cachedUser models.User
+	found, _ := CacheService.Get(context.Background(), key, &cachedUser)
+	if found {
 		log.Printf("Cache hit for user ID: %d", userID)
-		return cachedUser, nil
+		return &cachedUser, nil
 	}
-	if err != redis.Nil {
-		log.Printf("Cache error for ID %d: %v", userID, err)
-	}
-
-	var user models.User
-	// err = DB.First(&user, userID).Error
-	err = DB.Where("id = ?", userID).First(&user).Error
-	if err != nil {
+	if err := DB.Where("id = ?", userID).First(&cachedUser).Error; err != nil {
 		return nil, err
 	}
 
-	go func() {
-		if err := cacheSetUser(cacheKey, &user, userCacheExpiration); err != nil {
-			log.Printf("Failed to cache user by ID: %v", err)
-		}
-	}()
+	// Cache result
+	CacheService.SetWithTTL(context.Background(), key, cachedUser, 24*time.Hour)
 
-	return &user, nil
+	return &cachedUser, nil
 }
 
 func GetUserByPhone(phone string) (*models.User, error) {
-	cacheKey := GetUserCacheKeyByPhone(phone)
-	cachedUser, err := cacheGetUser(cacheKey)
-	if err == nil {
+	key := CacheService.GenerateKey("user", "phone", phone)
+	var cachedUser models.User
+	found, _ := CacheService.Get(context.Background(), key, &cachedUser)
+	if found {
 		log.Printf("Cache hit for user phone: %s", phone)
-		return cachedUser, nil
-	}
-	if err != redis.Nil {
-		log.Printf("Cache error for phone %s: %v", phone, err)
+		return &cachedUser, nil
 	}
 
 	var user models.User
@@ -86,11 +64,8 @@ func GetUserByPhone(phone string) (*models.User, error) {
 		return nil, result.Error
 	}
 
-	go func() {
-		if err := cacheSetUser(cacheKey, &user, userCacheExpiration); err != nil {
-			log.Printf("Failed to cache user by phone: %v", err)
-		}
-	}()
+	// Cache the result
+	CacheService.SetWithTTL(context.Background(), key, user, 24*time.Hour)
 
 	return &user, nil
 }
@@ -162,24 +137,6 @@ func DeleteUserByID(userID string) error {
 	return nil
 }
 
-func IncrementUserTokenVersion(userID uint) error {
-	// First, fetch the user to get the email and phone values.
-	var user models.User
-	if err := DB.First(&user, userID).Error; err != nil {
-		return err
-	}
-
-	// Invalidate all cache keys for the user
-	cacheKeyID := GetUserCacheKeyByID(userID)
-	cacheKeyEmail := GetUserCacheKeyByEmail(user.Email)
-	cacheKeyPhone := GetUserCacheKeyByPhone(user.Phone)
-	RedisClient.Del(RedisCtx, cacheKeyID, cacheKeyEmail, cacheKeyPhone)
-
-	// Increment the token version and save to the database
-	user.TokenVersion++
-	return DB.Save(&user).Error
-}
-
 // Instead, implement the function at the package level
 func GetUserTransactionsPaginated(userID uint, limit, offset int) ([]models.Transaction, int64, error) {
 	var transactions []models.Transaction
@@ -216,4 +173,19 @@ func (r *userRepository) GetBalance(userID uint) (float64, error) {
 
 func (r *userRepository) UpdateBalance(userID uint, newBalance float64) error {
 	return r.db.Model(&models.User{}).Where("id = ?", userID).Update("balance", newBalance).Error
+}
+
+// Add this function to handle user cache invalidation
+func InvalidateUserCache(userID uint) error {
+	// Generate keys for all user cache entries
+	idKey := CacheService.GenerateKey("user", "id", userID)
+
+	// Delete the cache entries
+	if err := CacheService.Delete(context.Background(), idKey); err != nil {
+		return err
+	}
+
+	// Log the invalidation
+	log.Printf("Invalidated cache for user ID: %d", userID)
+	return nil
 }

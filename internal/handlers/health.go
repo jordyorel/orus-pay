@@ -18,11 +18,9 @@ func HealthCheck(c *fiber.Ctx) error {
 }
 
 func CacheStats(c *fiber.Ctx) error {
-	stats := repositories.GetCacheStats()
-	poolStats := repositories.RedisClient.PoolStats()
+	poolStats := repositories.CacheService.GetStats(c.Context())
 
 	return c.JSON(fiber.Map{
-		"cache_stats": stats,
 		"pool_stats": fiber.Map{
 			"hits":        poolStats.Hits,
 			"misses":      poolStats.Misses,

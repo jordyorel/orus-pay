@@ -1,6 +1,7 @@
 package repositories
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -27,6 +28,7 @@ type TransactionRepository interface {
 	GetMerchantTransactions(merchantID uint, limit, offset int) ([]models.Transaction, int64, error)
 	FindByID(id uint) (*models.Transaction, error)
 	Update(transaction *models.Transaction) error
+	GetDailyTransactionTotal(ctx context.Context, userID uint, start, end time.Time, txType string, total *float64) error
 }
 
 func CreateTransaction(tx *models.Transaction) error {
@@ -44,16 +46,14 @@ func UpdateTransaction(tx *models.Transaction) error {
 }
 
 // Get all transactions for admin with pagination
-func GetTransactions(limit int, offset int) ([]models.Transaction, error) {
+func GetTransactions(limit, offset int) ([]models.Transaction, int64, error) {
 	var transactions []models.Transaction
+	var total int64
 
-	// Try ordering by a date column that exists in your table
-	// Common options might be: transaction_date, timestamp, processed_at, etc.
-	result := DB.Limit(limit).Offset(offset).
-		Order("transaction_id DESC"). // Transaction IDs often contain timestamps
-		Find(&transactions)
+	DB.Model(&models.Transaction{}).Count(&total)
+	result := DB.Limit(limit).Offset(offset).Find(&transactions)
 
-	return transactions, result.Error
+	return transactions, total, result.Error
 }
 
 // Get transactions for a specific user with pagination
@@ -79,7 +79,8 @@ func ProcessTransaction(senderID uint, receiverID uint, amount float64, qrCodeID
 		}
 
 		// Get sender's wallet
-		senderWallet, err := GetWalletByUserID(senderID)
+		var senderWallet models.Wallet
+		err := tx.Where("user_id = ?", senderID).First(&senderWallet).Error
 		if err != nil {
 			return fmt.Errorf("failed to fetch sender's wallet: %v", err)
 		}
@@ -90,7 +91,8 @@ func ProcessTransaction(senderID uint, receiverID uint, amount float64, qrCodeID
 		}
 
 		// Get receiver's wallet
-		receiverWallet, err := GetWalletByUserID(receiverID)
+		var receiverWallet models.Wallet
+		err = tx.Where("user_id = ?", receiverID).First(&receiverWallet).Error
 		if err != nil {
 			return fmt.Errorf("failed to fetch receiver's wallet: %v", err)
 		}
@@ -134,8 +136,8 @@ func ProcessTransaction(senderID uint, receiverID uint, amount float64, qrCodeID
 }
 
 func InvalidateWalletCache(userID uint) {
-	cacheKey := getWalletCacheKeyByUserID(userID)
-	RedisClient.Del(RedisCtx, cacheKey)
+	key := CacheService.GenerateKey("wallet", "user", userID)
+	CacheService.Delete(context.Background(), key)
 }
 
 // transactionRepository struct
@@ -156,4 +158,22 @@ func (r *transactionRepository) Create(transaction *models.Transaction) error {
 
 func (r *transactionRepository) Update(transaction *models.Transaction) error {
 	return r.db.Save(transaction).Error
+}
+
+func (r *transactionRepository) GetDailyTransactionTotal(ctx context.Context, userID uint, start, end time.Time, txType string, total *float64) error {
+	key := CacheService.GenerateKey("transaction", "daily", map[string]interface{}{
+		"user_id": userID,
+		"start":   start.Format(time.RFC3339),
+		"end":     end.Format(time.RFC3339),
+		"type":    txType,
+	})
+
+	found, _ := CacheService.Get(ctx, key, total)
+	if found {
+		return nil
+	}
+
+	// If cache miss, proceed to database...
+	CacheService.SetWithTTL(ctx, key, *total, 5*time.Minute)
+	return nil
 }

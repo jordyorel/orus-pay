@@ -40,3 +40,15 @@ func (h *QRHandler) GetPaymentQR(c *fiber.Ctx) error {
 
 	return response.Success(c, "Payment QR code retrieved", qrCode)
 }
+
+// GetUserQRCodes gets all QR codes for a user
+func (h *QRHandler) GetUserQRCodes(c *fiber.Ctx) error {
+	userID := c.Locals("userID").(uint)
+
+	qrCodes, err := h.qrService.GetUserQRCodes(c.Context(), userID)
+	if err != nil {
+		return response.Error(c, fiber.StatusInternalServerError, "Failed to get QR codes")
+	}
+
+	return response.Success(c, "QR codes retrieved", qrCodes)
+}

@@ -21,7 +21,6 @@ import (
 	"orus/internal/services/wallet"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 )
 
@@ -30,16 +29,11 @@ var walletService wallet.Service
 // SetupRoutes configures all application routes.
 // It groups routes by functionality and applies appropriate middleware.
 func SetupRoutes(app *fiber.App, db *gorm.DB) {
-	// Initialize cache
-	redisClient := redis.NewClient(&redis.Options{
-		Addr: "localhost:6379",
-	})
-
 	// Initialize repositories
 	walletRepo := repositories.NewWalletRepository(repositories.DB)
-	cacheRepo := repositories.NewRedisCacheRepository(redisClient)
-	userRepo := repositories.NewUserRepository(repositories.DB)
+	userRepo := repositories.NewUserRepository(repositories.DB, repositories.CacheService)
 	cardRepo := repositories.NewCreditCardRepository(repositories.DB)
+	qrRepo := repositories.NewQRCodeRepository(repositories.DB)
 
 	// Initialize auth service and handler
 	jwtSecret := config.GetEnv("JWT_SECRET", "orus")
@@ -52,7 +46,7 @@ func SetupRoutes(app *fiber.App, db *gorm.DB) {
 	userService := user.NewService(userRepo)
 	walletService = wallet.NewService(
 		walletRepo,
-		cacheRepo,
+		repositories.CacheService,
 		cardService,
 		wallet.WalletConfig{},
 		&wallet.NoopMetricsCollector{},
@@ -62,12 +56,13 @@ func SetupRoutes(app *fiber.App, db *gorm.DB) {
 		repositories.DB,
 		walletService,
 		walletService,
-		cacheRepo,
+		repositories.CacheService,
 	)
 
 	qrService := qr.NewService(
 		repositories.DB,
-		cacheRepo,
+		qrRepo,
+		repositories.CacheService,
 		transactionService,
 		walletService,
 	)
@@ -88,7 +83,7 @@ func SetupRoutes(app *fiber.App, db *gorm.DB) {
 	disputeService := dispute.NewService(
 		repositories.NewDisputeRepository(db),
 		repositories.NewTransactionRepository(db),
-		repositories.NewUserRepository(db),
+		repositories.NewUserRepository(repositories.DB, repositories.CacheService),
 		db,
 	)
 	disputeHandler := handlers.NewDisputeHandler(disputeService)
@@ -107,18 +102,14 @@ func SetupRoutes(app *fiber.App, db *gorm.DB) {
 	// Public routes
 	api := app.Group("/api")
 
-	// Add welcome route at the API root
-	api.Get("/", func(c *fiber.Ctx) error {
-		return c.JSON(fiber.Map{
-			"message": "Welcome to Orus API",
-			"version": "1.0.0",
-			"status":  "running",
-		})
-	})
+	// Public endpoints (no auth required)
+	api.Post("/login", authHandler.LoginUser)       // This becomes /api/login
+	api.Post("/register", userHandler.RegisterUser) // This becomes /api/register
+	api.Post("/refresh", authHandler.RefreshToken)  // This becomes /api/refresh
 
-	api.Post("/register", userHandler.RegisterUser)
-	api.Post("/login", authHandler.LoginUser)
-	api.Post("/refresh", authHandler.RefreshToken)
+	// Debug endpoints (public)
+	api.Get("/debug/token-version/:id", authHandler.GetTokenVersion)
+	api.Get("/debug/token", authHandler.DebugToken)
 
 	// Also add a root welcome route
 	app.Get("/", func(c *fiber.Ctx) error {
@@ -133,10 +124,10 @@ func SetupRoutes(app *fiber.App, db *gorm.DB) {
 	authMiddleware := middleware.NewAuthMiddleware(authService)
 
 	// Protected routes with auth middleware
-	protected := api.Use(authMiddleware.Handler)
+	protected := api.Use(authMiddleware.Handler) // Auth middleware starts here
 
 	// Setup different route groups
-	setupUserRoutes(protected, paymentHandler, userHandler, cardHandler, authHandler)
+	setupUserRoutes(protected, paymentHandler, userHandler, cardHandler, authHandler, qrService)
 	setupMerchantRoutes(protected, merchantHandler, paymentHandler)
 	// setupEnterpriseRoutes(protected, enterpriseHandler)
 	setupAdminRoutes(app, authMiddleware)
@@ -145,8 +136,8 @@ func SetupRoutes(app *fiber.App, db *gorm.DB) {
 	// Add dashboard routes
 	addDashboardRoutes(app, dashboardHandler, authMiddleware.Handler)
 
-	// Add debug endpoint
-	app.Get("/api/debug/claims", func(c *fiber.Ctx) error {
+	// Add debug endpoint for protected routes
+	protected.Get("/debug/claims", func(c *fiber.Ctx) error {
 		claims, ok := c.Locals("claims").(*models.UserClaims)
 		if !ok {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
@@ -164,10 +155,10 @@ func SetupRoutes(app *fiber.App, db *gorm.DB) {
 	})
 
 	// Add temporary cache stats route
-	app.Get("/api/test/cache-stats", authMiddleware.Handler, handlers.CacheStats)
+	protected.Get("/test/cache-stats", handlers.CacheStats)
 }
 
-func setupUserRoutes(router fiber.Router, paymentHandler *handlers.PaymentHandler, userHandler *handlers.UserHandler, cardHandler *handlers.CreditCardHandler, authHandler *handlers.AuthHandler) {
+func setupUserRoutes(router fiber.Router, paymentHandler *handlers.PaymentHandler, userHandler *handlers.UserHandler, cardHandler *handlers.CreditCardHandler, authHandler *handlers.AuthHandler, qrService qr.Service) {
 	// Initialize wallet handler
 	walletHandler := handlers.NewWalletHandler(walletService)
 
@@ -191,6 +182,10 @@ func setupUserRoutes(router fiber.Router, paymentHandler *handlers.PaymentHandle
 	payments := router.Group("/payment")
 	payments.Post("/scan", paymentHandler.ProcessQRPayment) // For users scanning QRs
 	payments.Post("/send", paymentHandler.SendMoney)        //✅
+
+	// QR code routes
+	qrHandler := handlers.NewQRHandler(qrService)
+	router.Get("/qr-codes", middleware.HasPermission(models.PermissionWalletRead), qrHandler.GetUserQRCodes)
 }
 
 func setupMerchantRoutes(router fiber.Router, h *handlers.MerchantHandler, paymentHandler *handlers.PaymentHandler) {

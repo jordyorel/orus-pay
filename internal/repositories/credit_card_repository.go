@@ -24,4 +24,7 @@ type CreditCardRepository interface {
 	// Status operations
 	UpdateStatus(cardID uint, status string) error
 	SetDefault(cardID uint, isDefault bool) error
+
+	// New method
+	GetByIDAndUserID(cardID uint, userID uint) (*models.CreditCard, error)
 }

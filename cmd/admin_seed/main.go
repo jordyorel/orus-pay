@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 
@@ -35,8 +36,8 @@ func main() {
 			}
 		}
 
-		if repositories.RedisClient != nil {
-			if err := repositories.RedisClient.Close(); err != nil {
+		if repositories.CacheService != nil {
+			if err := repositories.CacheService.Close(); err != nil {
 				log.Printf("⚠️ Failed to close Redis connection: %v", err)
 			}
 		}
@@ -68,15 +69,16 @@ func main() {
 
 	log.Printf("Admin user created with ID: %d", adminUser.ID)
 
-	if repositories.RedisClient != nil {
+	if repositories.CacheService != nil {
 		if err := repositories.InvalidateUserCache(adminUser.ID); err != nil {
 			log.Printf("Warning: Failed to invalidate admin user cache: %v", err)
 		}
 
-		repositories.RedisClient.Del(repositories.RedisCtx,
-			repositories.GetUserCacheKeyByEmail(adminEmail),
-			repositories.GetUserCacheKeyByPhone(adminPhone),
-		)
+		emailKey := repositories.CacheService.GenerateKey("user", "email", adminEmail)
+		phoneKey := repositories.CacheService.GenerateKey("user", "phone", adminPhone)
+		if err := repositories.CacheService.Delete(context.Background(), emailKey, phoneKey); err != nil {
+			log.Printf("Warning: Failed to invalidate admin user email/phone cache: %v", err)
+		}
 
 		log.Println("Admin user cache invalidated")
 	}

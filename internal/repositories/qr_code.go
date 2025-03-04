@@ -9,6 +9,25 @@ import (
 	"gorm.io/gorm"
 )
 
+type QRCodeRepository interface {
+	GetQRCodesByUserID(ctx context.Context, userID uint) ([]*models.QRCode, error)
+	// Add other QR code related methods as needed
+}
+
+type qrCodeRepository struct {
+	db *gorm.DB
+}
+
+func NewQRCodeRepository(db *gorm.DB) QRCodeRepository {
+	return &qrCodeRepository{db: db}
+}
+
+func (r *qrCodeRepository) GetQRCodesByUserID(ctx context.Context, userID uint) ([]*models.QRCode, error) {
+	var qrCodes []*models.QRCode
+	err := r.db.Where("user_id = ?", userID).Find(&qrCodes).Error
+	return qrCodes, err
+}
+
 func CreateQRCode(qr *models.QRCode) (*models.QRCode, error) {
 	if err := DB.Create(qr).Error; err != nil {
 		return nil, err

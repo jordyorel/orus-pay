@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"orus/internal/config"
 	"strconv"
@@ -69,11 +70,11 @@ func main() {
 		log.Println("✅ Successfully connected to database with connection pooling")
 	}
 
-	// Clear Redis cache on startup
-	if repositories.RedisClient != nil {
-		status := repositories.RedisClient.FlushDB(repositories.RedisCtx)
-		if status.Err() != nil {
-			log.Printf("⚠️ Failed to flush Redis cache: %v", status.Err())
+	// Clear Redis cache on startup using CacheService
+	if repositories.CacheService != nil {
+		err := repositories.CacheService.FlushAll(context.Background())
+		if err != nil {
+			log.Printf("⚠️ Failed to flush Redis cache: %v", err)
 		} else {
 			log.Println("✅ Redis cache flushed on startup")
 		}
@@ -92,9 +93,9 @@ func main() {
 			}
 		}
 
-		// Close Redis connection
-		if repositories.RedisClient != nil {
-			if err := repositories.RedisClient.Close(); err != nil {
+		// Close Redis connection via CacheService
+		if repositories.CacheService != nil {
+			if err := repositories.CacheService.Close(); err != nil {
 				log.Printf("⚠️ Failed to close Redis connection: %v", err)
 			}
 		}

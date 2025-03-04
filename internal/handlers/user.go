@@ -5,8 +5,8 @@ import (
 	qr "orus/internal/services/qr_code"
 	"orus/internal/services/user"
 	"orus/internal/services/wallet"
+	"orus/internal/utils/pagination"
 	"orus/internal/utils/response"
-	"strconv"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -150,21 +150,13 @@ func (h *UserHandler) ChangePassword(c *fiber.Ctx) error {
 func (h *UserHandler) GetUserTransactions(c *fiber.Ctx) error {
 	claims := c.Locals("claims").(*models.UserClaims)
 
-	// Get pagination parameters
-	page, _ := strconv.Atoi(c.Query("page", "1"))
-	limit, _ := strconv.Atoi(c.Query("limit", "10"))
+	p := pagination.ParseFromRequest(c)
 
-	transactions, total, err := h.userService.GetTransactions(claims.UserID, page, limit)
+	transactions, total, err := h.userService.GetTransactions(claims.UserID, p.Limit, p.Offset)
 	if err != nil {
 		return response.Error(c, fiber.StatusInternalServerError, "Failed to fetch transactions")
 	}
 
-	return response.Success(c, "Transactions retrieved", fiber.Map{
-		"transactions": transactions,
-		"pagination": fiber.Map{
-			"page":  page,
-			"limit": limit,
-			"total": total,
-		},
-	})
+	p.Total = total
+	return c.JSON(pagination.Response(p, transactions))
 }

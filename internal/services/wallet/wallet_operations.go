@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"orus/internal/models"
-	"orus/internal/repositories"
-	"orus/internal/utils/cache"
+	"orus/internal/repositories/cache"
+	"time"
 
 	"gorm.io/gorm"
 )
@@ -34,10 +34,10 @@ type WalletOperation struct {
 
 type WalletService struct {
 	db    *gorm.DB
-	cache repositories.CacheRepository
+	cache *cache.CacheService
 }
 
-func NewWalletService(db *gorm.DB, cache repositories.CacheRepository) *WalletService {
+func NewWalletService(db *gorm.DB, cache *cache.CacheService) *WalletService {
 	return &WalletService{
 		db:    db,
 		cache: cache,
@@ -90,7 +90,7 @@ func (s *WalletService) ProcessOperation(ctx context.Context, op WalletOperation
 		}
 
 		// Invalidate cache
-		cacheKey := cache.GenerateKey(cache.EntityWallet, cache.KeyID, op.UserID)
+		cacheKey := s.cache.GenerateKey("wallet", "user", op.UserID)
 		s.cache.Delete(ctx, cacheKey)
 
 		return nil
@@ -108,10 +108,12 @@ func (s *WalletService) getWalletForUpdate(tx *gorm.DB, userID uint) (*models.Wa
 }
 
 func (s *WalletService) GetBalance(ctx context.Context, userID uint) (float64, error) {
-	cacheKey := cache.GenerateKey(cache.EntityWallet, cache.KeyID, userID)
+	cacheKey := s.cache.GenerateKey("wallet", "user", userID)
 
 	// Try cache first
-	if balance, err := s.cache.GetFloat64(ctx, cacheKey); err == nil {
+	var balance float64
+	found, _ := s.cache.Get(ctx, cacheKey, &balance)
+	if found {
 		return balance, nil
 	}
 
@@ -121,7 +123,7 @@ func (s *WalletService) GetBalance(ctx context.Context, userID uint) (float64, e
 	}
 
 	// Cache the balance
-	s.cache.SetFloat64(ctx, cacheKey, wallet.Balance, repositories.DefaultExpiration)
+	s.cache.SetWithTTL(ctx, cacheKey, wallet.Balance, 30*time.Minute)
 
 	return wallet.Balance, nil
 }

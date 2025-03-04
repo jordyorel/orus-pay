@@ -29,6 +29,9 @@ type Service interface {
 
 	// New method
 	ValidateQRCode(ctx context.Context, code string, amount float64) (uint, error)
+
+	// Additional method
+	GetUserQRCodes(ctx context.Context, userID uint) ([]*models.QRCode, error)
 }
 
 // GenerateQRRequest encapsulates parameters for QR generation

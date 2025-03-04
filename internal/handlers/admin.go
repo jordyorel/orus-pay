@@ -6,6 +6,8 @@ import (
 	"orus/internal/repositories"
 	"strconv"
 
+	"orus/internal/utils/pagination"
+
 	"github.com/gofiber/fiber/v2"
 )
 
@@ -18,33 +20,16 @@ func GetUsersPaginated(c *fiber.Ctx) error {
 		})
 	}
 
-	// Get pagination parameters
-	page, _ := strconv.Atoi(c.Query("page", "1"))
-	limit, _ := strconv.Atoi(c.Query("limit", "10"))
-	offset := (page - 1) * limit
+	p := pagination.ParseFromRequest(c)
 
-	// Get paginated users
-	users, total, err := repositories.GetUsersPaginated(limit, offset)
+	users, total, err := repositories.GetUsersPaginated(p.Limit, p.Offset)
 	if err != nil {
 		log.Printf("Error fetching paginated users: %v", err)
 		return c.Status(500).JSON(fiber.Map{"error": "Failed to fetch users"})
 	}
 
-	// Calculate total pages
-	totalPages := total / int64(limit)
-	if total%int64(limit) > 0 {
-		totalPages++
-	}
-
-	return c.JSON(fiber.Map{
-		"data": users,
-		"meta": fiber.Map{
-			"current_page": page,
-			"per_page":     limit,
-			"total_items":  total,
-			"total_pages":  totalPages,
-		},
-	})
+	p.Total = total
+	return c.JSON(pagination.Response(p, users))
 }
 
 // GetAllWallets retrieves all wallets in a paginated manner (Admin only)
@@ -57,13 +42,9 @@ func GetAllWallets(c *fiber.Ctx) error {
 		})
 	}
 
-	// Pagination
-	page, _ := strconv.Atoi(c.Query("page", "1"))
-	limit, _ := strconv.Atoi(c.Query("limit", "10"))
-	offset := (page - 1) * limit
+	p := pagination.ParseFromRequest(c)
 
-	// Fetch paginated wallets
-	wallets, total, err := repositories.GetWalletsPaginated(limit, offset)
+	wallets, total, err := repositories.GetWalletsPaginated(p.Limit, p.Offset)
 	if err != nil {
 		log.Printf("Error fetching wallets: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -71,22 +52,8 @@ func GetAllWallets(c *fiber.Ctx) error {
 		})
 	}
 
-	// Calculate total pages
-	totalPages := total / int64(limit)
-	if total%int64(limit) > 0 {
-		totalPages++
-	}
-
-	// Return paginated wallets
-	return c.JSON(fiber.Map{
-		"data": wallets,
-		"meta": fiber.Map{
-			"current_page": page,
-			"per_page":     limit,
-			"total_items":  total,
-			"total_pages":  totalPages,
-		},
-	})
+	p.Total = total
+	return c.JSON(pagination.Response(p, wallets))
 }
 
 // GetAllCreditCards retrieves all credit cards in a paginated manner (Admin only)
@@ -99,13 +66,9 @@ func GetAllCreditCards(c *fiber.Ctx) error {
 		})
 	}
 
-	// Pagination
-	page, _ := strconv.Atoi(c.Query("page", "1"))
-	limit, _ := strconv.Atoi(c.Query("limit", "10"))
-	offset := (page - 1) * limit
+	p := pagination.ParseFromRequest(c)
 
-	// Fetch paginated credit cards
-	creditCards, total, err := repositories.GetCreditCardsPaginated(limit, offset)
+	creditCards, total, err := repositories.GetCreditCardsPaginated(p.Limit, p.Offset)
 	if err != nil {
 		log.Printf("Error fetching credit cards: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -113,22 +76,8 @@ func GetAllCreditCards(c *fiber.Ctx) error {
 		})
 	}
 
-	// Calculate total pages
-	totalPages := total / int64(limit)
-	if total%int64(limit) > 0 {
-		totalPages++
-	}
-
-	// Return paginated credit cards
-	return c.JSON(fiber.Map{
-		"data": creditCards,
-		"meta": fiber.Map{
-			"current_page": page,
-			"per_page":     limit,
-			"total_items":  total,
-			"total_pages":  totalPages,
-		},
-	})
+	p.Total = total
+	return c.JSON(pagination.Response(p, creditCards))
 }
 
 func GetAllTransactions(c *fiber.Ctx) error {
@@ -147,24 +96,18 @@ func GetAllTransactions(c *fiber.Ctx) error {
 		})
 	}
 
-	// Pagination and optional filtering
-	page, _ := strconv.Atoi(c.Query("page", "1"))
-	limit, _ := strconv.Atoi(c.Query("limit", "10"))
-	offset := (page - 1) * limit
+	p := pagination.ParseFromRequest(c)
 
 	// Fetch all transactions
-	transactions, err := repositories.GetTransactions(limit, offset)
+	transactions, total, err := repositories.GetTransactions(p.Limit, p.Offset)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "Failed to fetch transactions",
 		})
 	}
 
-	return c.Status(fiber.StatusOK).JSON(fiber.Map{
-		"transactions": transactions,
-		"page":         page,
-		"limit":        limit,
-	})
+	p.Total = total
+	return c.JSON(pagination.Response(p, transactions))
 }
 
 // DeleteUser allows admins to delete a user by their ID

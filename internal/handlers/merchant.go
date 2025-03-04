@@ -10,9 +10,8 @@ import (
 	qr "orus/internal/services/qr_code"
 	"orus/internal/utils"
 
+	"orus/internal/utils/pagination"
 	"orus/internal/utils/response"
-
-	"strconv"
 
 	"github.com/gofiber/fiber/v2"
 	"gorm.io/gorm"
@@ -256,24 +255,13 @@ func (h *MerchantHandler) SetWebhookURL(c *fiber.Ctx) error {
 
 func (h *MerchantHandler) GetMerchantTransactions(c *fiber.Ctx) error {
 	claims := c.Locals("claims").(*models.UserClaims)
+	p := pagination.ParseFromRequest(c)
 
-	// Parse pagination parameters
-	page, _ := strconv.Atoi(c.Query("page", "1"))
-	limit, _ := strconv.Atoi(c.Query("limit", "10"))
-	offset := (page - 1) * limit
-
-	// Get transactions
-	transactions, total, err := h.transactionRepo.GetMerchantTransactions(claims.UserID, limit, offset)
+	transactions, total, err := h.transactionRepo.GetMerchantTransactions(claims.UserID, p.Limit, p.Offset)
 	if err != nil {
 		return response.Error(c, fiber.StatusInternalServerError, "Failed to get transactions")
 	}
 
-	return response.Success(c, "Transactions retrieved", fiber.Map{
-		"transactions": transactions,
-		"pagination": fiber.Map{
-			"total": total,
-			"page":  page,
-			"limit": limit,
-		},
-	})
+	p.Total = total
+	return c.JSON(pagination.Response(p, transactions))
 }

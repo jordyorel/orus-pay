@@ -5,16 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"orus/internal/models"
 	"orus/internal/repositories"
+	"orus/internal/repositories/cache"
 	creditcard "orus/internal/services/credit-card"
-	"orus/internal/utils/cache"
 	"time"
 )
 
 type service struct {
 	repo        repositories.WalletRepository
-	cache       repositories.CacheRepository
+	cache       *cache.CacheService
 	cardService creditcard.Service
 	config      WalletConfig
 	metrics     MetricsCollector
@@ -23,7 +24,7 @@ type service struct {
 // NewService creates a new wallet service
 func NewService(
 	repo repositories.WalletRepository,
-	cache repositories.CacheRepository,
+	cache *cache.CacheService,
 	cardService creditcard.Service,
 	config WalletConfig,
 	metrics MetricsCollector,
@@ -93,11 +94,11 @@ func (s *service) GetWallet(ctx context.Context, userID uint) (*models.Wallet, e
 	}
 
 	// Try to get from cache first
-	cacheKey := cache.GenerateUserWalletKey(userID)
+	cacheKey := s.cache.GenerateKey("wallet", "user", userID)
 
 	// Check if we have it in cache
-	cachedWallet, err := repositories.GetCachedWallet(cacheKey)
-	if err == nil && cachedWallet != nil {
+	var cachedWallet *models.Wallet
+	if _, err := s.cache.Get(ctx, cacheKey, &cachedWallet); err == nil && cachedWallet != nil {
 		return cachedWallet, nil
 	}
 
@@ -108,7 +109,9 @@ func (s *service) GetWallet(ctx context.Context, userID uint) (*models.Wallet, e
 	}
 
 	// Store in cache for future use (with a shorter TTL to reduce stale data issues)
-	repositories.CacheWallet(cacheKey, wallet, 1*time.Minute)
+	if err := s.cache.SetWithTTL(ctx, cacheKey, wallet, 1*time.Minute); err != nil {
+		log.Printf("Failed to cache wallet: %v", err)
+	}
 
 	return wallet, nil
 }
@@ -126,7 +129,8 @@ func (s *service) CreateWallet(ctx context.Context, userID uint, currency string
 	}
 
 	// Update cache
-	s.cache.SetWallet(ctx, userID, wallet)
+	key := s.cache.GenerateKey("wallet", "user", userID)
+	s.cache.SetWithTTL(ctx, key, wallet, CacheDuration)
 	return wallet, nil
 }
 
@@ -180,7 +184,8 @@ func (s *service) Credit(ctx context.Context, walletID uint, amount float64) err
 	}
 
 	// Invalidate cache
-	s.invalidateWalletCaches(ctx, wallet.UserID)
+	senderKey := s.cache.GenerateKey("wallet", "user", walletID)
+	s.cache.Delete(ctx, senderKey)
 
 	// Record metrics
 	s.metrics.RecordTransaction("credit", amount)
@@ -226,7 +231,8 @@ func (s *service) Debit(ctx context.Context, walletID uint, amount float64) erro
 	}
 
 	// Invalidate cache
-	s.invalidateWalletCaches(ctx, wallet.UserID)
+	senderKey := s.cache.GenerateKey("wallet", "user", walletID)
+	s.cache.Delete(ctx, senderKey)
 
 	// Record metrics
 	s.metrics.RecordTransaction("debit", amount)
@@ -271,7 +277,8 @@ func (s *service) UpdateWallet(ctx context.Context, wallet *models.Wallet) error
 	}
 
 	// Invalidate cache
-	s.cache.DeleteWallet(ctx, wallet.UserID)
+	senderKey := s.cache.GenerateKey("wallet", "user", wallet.UserID)
+	s.cache.Delete(ctx, senderKey)
 
 	return nil
 }
@@ -386,27 +393,29 @@ func (s *service) checkMonthlyLimit(ctx context.Context, userID uint, amount flo
 	return nil
 }
 
-func (s *service) GetTransactionHistory(ctx context.Context, walletID uint, limit, offset int) ([]TransactionHistory, error) {
-	cacheKey := fmt.Sprintf("%s:history:%d:%d", WalletCachePrefix, walletID, limit)
+func (s *service) GetTransactionHistory(ctx context.Context, userID uint, limit, offset int) ([]TransactionHistory, error) {
+	// Generate cache key for common queries
+	cacheKey := fmt.Sprintf("tx_history:%d:%d:%d", userID, limit, offset)
 
 	// Try cache first for common queries
 	if offset == 0 && (limit == 10 || limit == 20) {
-		if cached, err := s.cache.Get(ctx, cacheKey); err == nil {
-			if history, ok := cached.([]TransactionHistory); ok {
-				return history, nil
-			}
+		var history []TransactionHistory
+		found, _ := s.cache.Get(ctx, cacheKey, &history)
+		if found {
+			return history, nil
 		}
 	}
 
+	// Cache miss, fetch from database
 	var history []TransactionHistory
-	err := s.repo.GetTransactionHistory(ctx, walletID, limit, offset, &history)
+	err := s.repo.GetTransactionHistory(ctx, userID, limit, offset, &history)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get transaction history: %w", err)
 	}
 
 	// Cache the result for common queries
 	if offset == 0 && (limit == 10 || limit == 20) {
-		if err := s.cache.Set(ctx, cacheKey, history, CacheDuration); err != nil {
+		if err := s.cache.SetWithTTL(ctx, cacheKey, history, CacheDuration); err != nil {
 			// Log error but don't fail the request
 			fmt.Printf("Failed to cache transaction history: %v\n", err)
 		}
@@ -430,7 +439,8 @@ func (s *service) recordTransaction(tx repositories.WalletRepository, walletID u
 // Add new cache invalidation helper
 func (s *service) invalidateWalletCaches(ctx context.Context, userIDs ...uint) {
 	for _, userID := range userIDs {
-		if err := s.cache.DeleteWallet(ctx, userID); err != nil {
+		key := s.cache.GenerateKey("wallet", "user", userID)
+		if err := s.cache.Delete(ctx, key); err != nil {
 			log.Printf("Failed to invalidate wallet cache for user %d: %v", userID, err)
 		} else {
 			log.Printf("Cache INVALIDATE: wallet:%d", userID)
@@ -596,14 +606,12 @@ func (s *service) Transfer(ctx context.Context, fromUserID, toUserID uint, amoun
 		return nil, ErrTransactionFailed
 	}
 
-	// Aggressively invalidate all caches
-	InvalidateWalletCache(sourceWallet.ID)
-	InvalidateWalletCache(destWallet.ID)
-	InvalidateUserWalletCache(fromUserID)
-	InvalidateUserWalletCache(toUserID)
+	// Invalidate caches
+	senderKey := s.cache.GenerateKey("wallet", "user", fromUserID)
+	receiverKey := s.cache.GenerateKey("wallet", "user", toUserID)
+	s.cache.Delete(ctx, senderKey)
+	s.cache.Delete(ctx, receiverKey)
 	s.invalidateWalletCaches(ctx, fromUserID, toUserID)
-	s.cache.DeleteWallet(ctx, fromUserID)
-	s.cache.DeleteWallet(ctx, toUserID)
 
 	// Record metrics
 	s.metrics.RecordTransaction("transfer", amount)
@@ -661,7 +669,8 @@ func (s *service) TopUp(ctx context.Context, userID, cardID uint, amount float64
 
 	// Process top-up
 	err = s.repo.ExecuteInTransaction(func(tx repositories.WalletRepository) error {
-		wallet.Balance += amount
+		// Round the balance to 2 decimal places when updating
+		wallet.Balance = math.Round((wallet.Balance+amount)*100) / 100
 		if err := tx.Update(wallet); err != nil {
 			return err
 		}
@@ -692,25 +701,27 @@ func (s *service) TopUp(ctx context.Context, userID, cardID uint, amount float64
 		return ErrTransactionFailed
 	}
 
-	// After successful top-up, explicitly invalidate all caches
-	InvalidateUserWalletCache(userID)
-
-	// If you have the wallet ID available, also invalidate that
-	wallet, err = repositories.GetWalletByUserID(userID)
-	if err == nil && wallet != nil {
-		InvalidateWalletCache(wallet.ID)
-	}
-
-	// Also clear any cache in the old system
+	// Invalidate all caches
+	senderKey := s.cache.GenerateKey("wallet", "user", userID)
+	s.cache.Delete(ctx, senderKey)
 	s.invalidateWalletCaches(ctx, userID)
-	s.cache.DeleteWallet(ctx, userID)
 
 	s.metrics.RecordTransaction("top_up", amount)
 
 	return nil
 }
 
-func (s *service) Withdraw(ctx context.Context, userID, cardID uint, amount float64) error {
+func (s *service) Withdraw(ctx context.Context, userID uint, cardID uint, amount float64) error {
+	// Add card validation
+	card, err := s.cardService.GetByIDAndUserID(cardID, userID)
+	if err != nil {
+		return fmt.Errorf("invalid card: %w", err)
+	}
+
+	if card.Status != "active" {
+		return errors.New("card is not active")
+	}
+
 	// Get user role from context
 	roleVal := ctx.Value(UserRoleContextKey)
 	role, ok := roleVal.(string)
@@ -718,10 +729,10 @@ func (s *service) Withdraw(ctx context.Context, userID, cardID uint, amount floa
 		role = "user" // Default to user fees
 	}
 
-	// Calculate fee based on role
+	// Calculate fee based on role (keeping your original logic)
 	feePercent := s.config.WithdrawalFees[role]
-	fee := amount * feePercent
-	totalAmount := amount + fee
+	fee := math.Round(amount*feePercent*100) / 100    // Round fee to 2 decimals
+	totalAmount := math.Round((amount+fee)*100) / 100 // Round total to 2 decimals
 
 	if amount <= 0 {
 		return ErrInvalidAmount
@@ -741,8 +752,9 @@ func (s *service) Withdraw(ctx context.Context, userID, cardID uint, amount floa
 		return ErrWalletLocked
 	}
 
-	err := s.repo.ExecuteInTransaction(func(tx repositories.WalletRepository) error {
-		wallet.Balance -= totalAmount
+	err = s.repo.ExecuteInTransaction(func(tx repositories.WalletRepository) error {
+		// Round the balance to 2 decimal places when updating
+		wallet.Balance = math.Round((wallet.Balance-totalAmount)*100) / 100
 		if err := tx.Update(&wallet); err != nil {
 			return err
 		}
@@ -787,14 +799,10 @@ func (s *service) Withdraw(ctx context.Context, userID, cardID uint, amount floa
 		return ErrTransactionFailed
 	}
 
-	// Explicitly invalidate all caches for this wallet
-	// Use both the wallet ID and user ID to ensure all cache entries are cleared
-	InvalidateWalletCache(wallet.ID)
-	InvalidateUserWalletCache(userID)
-
-	// Also clear any cache in the old system
-	s.invalidateWalletCaches(ctx, wallet.UserID)
-	s.cache.DeleteWallet(ctx, userID)
+	// Invalidate all caches
+	senderKey := s.cache.GenerateKey("wallet", "user", userID)
+	s.cache.Delete(ctx, senderKey)
+	s.invalidateWalletCaches(ctx, userID)
 
 	s.metrics.RecordTransaction("withdrawal", amount)
 
@@ -814,7 +822,8 @@ func (s *service) LockWallet(ctx context.Context, walletID uint, reason string) 
 		return fmt.Errorf("failed to lock wallet: %w", err)
 	}
 
-	s.invalidateWalletCaches(ctx, walletID)
+	senderKey := s.cache.GenerateKey("wallet", "user", walletID)
+	s.cache.Delete(ctx, senderKey)
 	return nil
 }
 
@@ -831,7 +840,8 @@ func (s *service) UnlockWallet(ctx context.Context, walletID uint) error {
 		return fmt.Errorf("failed to unlock wallet: %w", err)
 	}
 
-	s.invalidateWalletCaches(ctx, walletID)
+	senderKey := s.cache.GenerateKey("wallet", "user", walletID)
+	s.cache.Delete(ctx, senderKey)
 	return nil
 }
 
@@ -867,11 +877,15 @@ func (s *service) UpdateBalanceOnly(ctx context.Context, userID uint, amount flo
 	fmt.Printf("Updated wallet ID %d for user %d to new balance %.2f\n",
 		wallet.ID, userID, wallet.Balance)
 
-	// Invalidate all caches for this wallet
-	InvalidateWalletCache(wallet.ID)
-	InvalidateUserWalletCache(userID)
+	// Invalidate all caches
+	senderKey := s.cache.GenerateKey("wallet", "user", userID)
+	s.cache.Delete(ctx, senderKey)
 	s.invalidateWalletCaches(ctx, userID)
-	s.cache.DeleteWallet(ctx, userID)
 
 	return nil
+}
+
+func (s *service) ClearCache(ctx context.Context, userID uint) error {
+	senderKey := s.cache.GenerateKey("wallet", "user", userID)
+	return s.cache.Delete(ctx, senderKey)
 }

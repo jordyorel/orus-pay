@@ -25,4 +25,5 @@ type Service interface {
 	GetUserCards(userID uint) ([]models.CreditCard, error)
 	DeleteCard(userID uint, cardID uint) error
 	GetByID(cardID uint) (*models.CreditCard, error)
+	GetByIDAndUserID(cardID uint, userID uint) (*models.CreditCard, error)
 }

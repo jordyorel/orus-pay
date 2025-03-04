@@ -6,9 +6,12 @@ import (
 	"orus/internal/models"
 	"orus/internal/services/auth"
 	"orus/internal/utils"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 type AuthHandler struct {
@@ -23,7 +26,7 @@ func NewAuthHandler(authService auth.Service, refreshSecret string) *AuthHandler
 	}
 }
 
-// LoginUser handles user login requests
+// LoginUser handles user authentication and returns JWT tokens
 func (h *AuthHandler) LoginUser(c *fiber.Ctx) error {
 	var input struct {
 		Email    string `json:"email"`
@@ -32,36 +35,48 @@ func (h *AuthHandler) LoginUser(c *fiber.Ctx) error {
 	}
 
 	if err := c.BodyParser(&input); err != nil {
-		log.Printf("Error parsing login request: %v", err)
-		return utils.BadRequest(c, "Invalid request format")
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Invalid request body",
+		})
 	}
 
 	// Validate input
 	if (input.Email == "" && input.Phone == "") || input.Password == "" {
-		return utils.BadRequest(c, "Email/phone and password are required")
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Email/phone and password are required",
+		})
 	}
 
-	// Attempt login
 	user, accessToken, refreshToken, err := h.authService.Login(input.Email, input.Phone, input.Password)
 	if err != nil {
-		log.Printf("Login failed: %v", err)
-		return utils.Unauthorized(c, "Invalid credentials")
+		if err.Error() == "invalid credentials" {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error": "Invalid email or password",
+			})
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Authentication failed",
+		})
 	}
 
-	// Add debug logging
-	log.Printf("User logged in - ID: %d, Role: %s, Phone: %s", user.ID, user.Role, user.Phone)
+	// Set refresh token as HTTP-only cookie
+	cookie := fiber.Cookie{
+		Name:     "refresh_token",
+		Value:    refreshToken,
+		Path:     "/",
+		Expires:  time.Now().Add(7 * 24 * time.Hour),
+		HTTPOnly: true,
+		Secure:   true,
+		SameSite: "Strict",
+	}
+	c.Cookie(&cookie)
 
-	// Set auth cookies
-	h.setAuthCookies(c, accessToken, refreshToken)
-
-	// Return success response
-	return utils.Success(c, fiber.Map{
-		"token":         accessToken,
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"access_token":  accessToken,
 		"refresh_token": refreshToken,
 		"user": fiber.Map{
 			"id":          user.ID,
 			"email":       user.Email,
-			"phone":       user.Phone,
 			"role":        user.Role,
 			"permissions": models.GetDefaultPermissions(user.Role),
 		},
@@ -163,6 +178,76 @@ func (h *AuthHandler) ChangePassword(c *fiber.Ctx) error {
 
 	return utils.Success(c, fiber.Map{
 		"message": "Password changed successfully",
+	})
+}
+
+// GetTokenVersion handles getting the token version of a user
+func (h *AuthHandler) GetTokenVersion(c *fiber.Ctx) error {
+	userID, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Invalid user ID",
+		})
+	}
+
+	version, err := h.authService.GetUserTokenVersion(uint(userID))
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error":   "Failed to get token version",
+			"details": err.Error(),
+		})
+	}
+
+	return c.JSON(fiber.Map{
+		"user_id":       userID,
+		"token_version": version,
+	})
+}
+
+// Add this new handler to debug the token
+func (h *AuthHandler) DebugToken(c *fiber.Ctx) error {
+	// Get the token from the Authorization header
+	authHeader := c.Get("Authorization")
+	if authHeader == "" || len(strings.Split(authHeader, " ")) != 2 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Missing or invalid Authorization header",
+		})
+	}
+
+	tokenString := strings.Split(authHeader, " ")[1]
+
+	// Parse the token
+	token, err := jwt.ParseWithClaims(tokenString, &models.UserClaims{}, func(token *jwt.Token) (interface{}, error) {
+		return []byte(h.refreshSecret), nil
+	})
+
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error":   "Invalid token",
+			"details": err.Error(),
+		})
+	}
+
+	claims, ok := token.Claims.(*models.UserClaims)
+	if !ok {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Invalid token claims",
+		})
+	}
+
+	// Get the current token version from the database
+	currentVersion, err := h.authService.GetUserTokenVersion(claims.UserID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error":   "Failed to get current token version",
+			"details": err.Error(),
+		})
+	}
+
+	return c.JSON(fiber.Map{
+		"token_claims":    claims,
+		"current_version": currentVersion,
+		"is_valid":        claims.TokenVersion == currentVersion,
 	})
 }
 

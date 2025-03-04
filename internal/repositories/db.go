@@ -3,12 +3,13 @@
 package repositories
 
 import (
-	"encoding/json"
 	"log"
 	"orus/internal/config"
 	"orus/internal/models"
 	"os"
 	"time"
+
+	"orus/internal/repositories/cache"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -16,8 +17,8 @@ import (
 )
 
 // DB is the global database instance used across the application.
-// It provides access to the underlying database connection.
 var DB *gorm.DB
+var CacheService *cache.CacheService
 
 // DBConfig holds database connection pool configuration
 type DBConfig struct {
@@ -39,7 +40,16 @@ var dbConfig = DBConfig{
 // and configures the database with proper settings.
 func InitDB() error {
 	initPostgres()
-	InitRedis()
+
+	// Initialize Redis with new config
+	redisCfg := &cache.RedisConfig{
+		Host:     config.GetEnv("REDIS_HOST", "localhost"),
+		Port:     config.GetEnv("REDIS_PORT", "6379"),
+		Password: config.GetEnv("REDIS_PASSWORD", ""),
+		DB:       config.GetIntEnv("REDIS_DB", 0),
+	}
+	redisClient := cache.NewRedisClient(redisCfg)
+	CacheService = cache.NewCacheService(redisClient, 24*time.Hour)
 
 	// Auto-migrate the updated schema
 	err := DB.AutoMigrate(
@@ -131,37 +141,10 @@ func initPostgres() {
 	log.Println("✅ PostgreSQL connected & migrations applied successfully!")
 }
 
-// Helper functions remain the same
-func cacheGetUser(key string) (*models.User, error) {
-	val, err := RedisClient.Get(RedisCtx, key).Result()
-	if err != nil {
-		return nil, err
-	}
-
-	var user models.User
-	if err := json.Unmarshal([]byte(val), &user); err != nil {
-		return nil, err
-	}
-	return &user, nil
-}
-
-func cacheSetUser(key string, user *models.User, expiration time.Duration) error {
-	userBytes, err := json.Marshal(user)
-	if err != nil {
-		return err
-	}
-	return RedisClient.Set(RedisCtx, key, userBytes, expiration).Err()
-}
-
 func ResetDatabase() error {
 	// Drop tables
 	err := DB.Migrator().DropTable(&models.User{}, &models.Wallet{}, &models.QRCode{} /* other tables */)
 	if err != nil {
-		return err
-	}
-
-	// Clear all caches
-	if err := ClearAllCaches(); err != nil {
 		return err
 	}
 
@@ -177,12 +160,6 @@ func DropAllTables() error {
 		&models.Transaction{},
 		// ... other tables
 	)
-	if err != nil {
-		return err
-	}
-
-	// Clear all Redis cache
-	err = RedisClient.FlushAll(RedisCtx).Err()
 	if err != nil {
 		return err
 	}

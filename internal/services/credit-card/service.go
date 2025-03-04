@@ -67,3 +67,11 @@ func (s *serviceImpl) DeleteCard(userID uint, cardID uint) error {
 func (s *serviceImpl) GetByID(cardID uint) (*models.CreditCard, error) {
 	return repositories.GetCreditCardByID(cardID)
 }
+
+func (s *serviceImpl) GetByIDAndUserID(cardID uint, userID uint) (*models.CreditCard, error) {
+	card, err := s.repo.GetByIDAndUserID(cardID, userID)
+	if err != nil {
+		return nil, fmt.Errorf("card not found or access denied: %w", err)
+	}
+	return card, nil
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"orus/internal/models"
 	"orus/internal/repositories"
+	"orus/internal/repositories/cache"
 	"time"
 
 	"gorm.io/gorm"
@@ -21,7 +22,7 @@ type service struct {
 	db             *gorm.DB
 	walletService  WalletService
 	balanceService BalanceService
-	cache          repositories.CacheRepository
+	cache          *cache.CacheService
 	riskService    *RiskService
 }
 
@@ -29,7 +30,7 @@ func NewService(
 	db *gorm.DB,
 	walletSvc WalletService,
 	balanceSvc BalanceService,
-	cache repositories.CacheRepository,
+	cache *cache.CacheService,
 ) Service {
 	return &service{
 		db:             db,
@@ -93,8 +94,10 @@ func (s *service) ProcessTransaction(ctx context.Context, tx *models.Transaction
 	}
 
 	// Invalidate caches for both wallets
-	s.cache.DeleteWallet(ctx, tx.SenderID)
-	s.cache.DeleteWallet(ctx, tx.ReceiverID)
+	senderKey := s.cache.GenerateKey("wallet", "user", tx.SenderID)
+	receiverKey := s.cache.GenerateKey("wallet", "user", tx.ReceiverID)
+	s.cache.Delete(ctx, senderKey)
+	s.cache.Delete(ctx, receiverKey)
 
 	return tx, nil
 }

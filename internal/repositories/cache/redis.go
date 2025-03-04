@@ -11,6 +11,21 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+type RedisConfig struct {
+	Host     string
+	Port     string
+	Password string
+	DB       int
+}
+
+func NewRedisClient(cfg *RedisConfig) *redis.Client {
+	return redis.NewClient(&redis.Options{
+		Addr:     fmt.Sprintf("%s:%s", cfg.Host, cfg.Port),
+		Password: cfg.Password,
+		DB:       cfg.DB,
+	})
+}
+
 type RedisCache struct {
 	client *redis.Client
 }
@@ -84,4 +99,17 @@ func (c *RedisCache) SetWallet(ctx context.Context, wallet *models.Wallet) error
 
 func walletKey(userID uint) string {
 	return fmt.Sprintf("wallet:%d", userID)
+}
+
+// Add health check
+func (s *CacheService) HealthCheck(ctx context.Context) error {
+	if err := s.client.Ping(ctx).Err(); err != nil {
+		return fmt.Errorf("redis connection failed: %w", err)
+	}
+	return nil
+}
+
+// Add stats collection
+func (s *CacheService) GetStats(ctx context.Context) *redis.PoolStats {
+	return s.client.PoolStats()
 }

@@ -112,3 +112,15 @@ func (r *creditCardRepository) SetDefault(cardID uint, isDefault bool) error {
 		return nil
 	})
 }
+
+func (r *creditCardRepository) GetByIDAndUserID(cardID uint, userID uint) (*models.CreditCard, error) {
+	var card models.CreditCard
+	err := r.db.Where("id = ? AND user_id = ?", cardID, userID).First(&card).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, ErrCardNotFound
+		}
+		return nil, fmt.Errorf("failed to get card: %w", err)
+	}
+	return &card, nil
+}

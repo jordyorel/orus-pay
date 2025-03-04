@@ -1,7 +1,7 @@
 package repositories
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"log"
 	"math"
@@ -26,41 +26,13 @@ func getWalletCacheKeyByQRCodeID(qrCodeID string) string {
 	return fmt.Sprintf("wallet:qrcode:%s", qrCodeID)
 }
 
-func cacheGetWallet(key string) (*models.Wallet, error) {
-	val, err := RedisClient.Get(RedisCtx, key).Result()
-	if err != nil {
-		return nil, err
-	}
-
-	var wallet models.Wallet
-	if err := json.Unmarshal([]byte(val), &wallet); err != nil {
-		return nil, err
-	}
-	return &wallet, nil
-}
-
-func cacheSetWallet(key string, wallet *models.Wallet, expiration time.Duration) error {
-	walletBytes, err := json.Marshal(wallet)
-	if err != nil {
-		return err
-	}
-	return RedisClient.Set(RedisCtx, key, walletBytes, expiration).Err()
-}
-
-func GetWalletByUserID(userID uint) (*models.Wallet, error) {
-	var wallet models.Wallet
-	if err := DB.Where("user_id = ?", userID).First(&wallet).Error; err != nil {
-		return nil, err
-	}
-	return &wallet, nil
-}
-
 func GetWalletByQRCodeID(qrCodeID string) (*models.Wallet, error) {
-	cacheKeyQR := getWalletCacheKeyByQRCodeID(qrCodeID)
-	cachedWallet, err := cacheGetWallet(cacheKeyQR)
-	if err == nil {
+	cacheKeyQR := CacheService.GenerateKey("wallet", "qrcode", qrCodeID)
+	var cachedWallet models.Wallet
+	found, err := CacheService.Get(context.Background(), cacheKeyQR, &cachedWallet)
+	if found && err == nil {
 		log.Printf("Cache hit for wallet QR code ID: %s", qrCodeID)
-		return cachedWallet, nil
+		return &cachedWallet, nil
 	}
 	if err != redis.Nil {
 		log.Printf("Cache error for QR code ID %s: %v", qrCodeID, err)
@@ -89,11 +61,10 @@ func GetWalletByQRCodeID(qrCodeID string) (*models.Wallet, error) {
 		return nil, err
 	}
 
-	go func() {
-		if err := cacheSetWallet(cacheKeyQR, wallet, walletCacheExpiration); err != nil {
-			log.Printf("Failed to cache wallet by QR code ID %s: %v", qrCodeID, err)
-		}
-	}()
+	// Cache the result
+	if err := CacheService.SetWithTTL(context.Background(), cacheKeyQR, wallet, walletCacheExpiration); err != nil {
+		log.Printf("Failed to cache wallet by QR code ID %s: %v", qrCodeID, err)
+	}
 
 	return wallet, nil
 }
@@ -105,29 +76,11 @@ func CreateWallet(wallet *models.Wallet) error {
 	}
 
 	// Cache only by user ID now
-	cacheKey := getWalletCacheKeyByUserID(wallet.UserID)
-	go func() {
-		if err := cacheSetWallet(cacheKey, wallet, walletCacheExpiration); err != nil {
-			log.Printf("Failed to cache wallet for user %d: %v", wallet.UserID, err)
-		}
-	}()
-
-	return nil
-}
-
-func UpdateWallet(wallet *models.Wallet) error {
-	log.Printf("Updating wallet for user %d: New Balance = %.2f", wallet.UserID, wallet.Balance)
-	result := DB.Model(wallet).Updates(map[string]interface{}{
-		"balance":    wallet.Balance,
-		"updated_at": time.Now(),
-	})
-
-	if result.Error != nil {
-		log.Printf("Error updating wallet: %v", result.Error)
-		return result.Error
+	cacheKey := CacheService.GenerateKey("wallet", "user", wallet.UserID)
+	if err := CacheService.SetWithTTL(context.Background(), cacheKey, wallet, walletCacheExpiration); err != nil {
+		log.Printf("Failed to cache wallet for user %d: %v", wallet.UserID, err)
 	}
 
-	log.Printf("Successfully updated wallet for user %d", wallet.UserID)
 	return nil
 }
 
@@ -144,8 +97,8 @@ func TopUpWallet(userID uint, amount float64) error {
 		}
 
 		// Invalidate cache
-		cacheKey := fmt.Sprintf("wallet:user:%d", userID)
-		RedisClient.Del(RedisCtx, cacheKey)
+		cacheKey := CacheService.GenerateKey("wallet", "user", userID)
+		CacheService.Delete(context.Background(), cacheKey)
 
 		return nil
 	})
@@ -185,4 +138,24 @@ func ResetWalletBalance(userID uint) error {
 	return DB.Model(&models.Wallet{}).
 		Where("user_id = ?", userID).
 		Update("balance", 0).Error
+}
+
+func GetWalletByUserID(userID uint) (*models.Wallet, error) {
+	// Try cache first
+	key := CacheService.GenerateKey("wallet", "user", userID)
+	var wallet models.Wallet
+	found, _ := CacheService.Get(context.Background(), key, &wallet)
+	if found {
+		return &wallet, nil
+	}
+
+	// Cache miss, fetch from database
+	if err := DB.Where("user_id = ?", userID).First(&wallet).Error; err != nil {
+		return nil, err
+	}
+
+	// Cache the result
+	CacheService.SetWithTTL(context.Background(), key, wallet, 30*time.Minute)
+
+	return &wallet, nil
 }

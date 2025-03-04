@@ -2,10 +2,13 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"orus/internal/models"
+	"orus/internal/repositories"
 	"orus/internal/services/wallet"
 	"orus/internal/utils"
+	"strings"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -106,6 +109,15 @@ func (h *WalletHandler) WithdrawToCard(c *fiber.Ctx) error {
 
 	err = h.walletService.Withdraw(c.Context(), claims.UserID, input.CardID, input.Amount)
 	if err != nil {
+		if errors.Is(err, repositories.ErrCardNotFound) {
+			return utils.BadRequest(c, "Card not found")
+		}
+		if strings.Contains(err.Error(), "invalid card") {
+			return utils.BadRequest(c, "Invalid card or access denied")
+		}
+		if strings.Contains(err.Error(), "not active") {
+			return utils.BadRequest(c, "Card is not active")
+		}
 		return utils.InternalError(c, err.Error())
 	}
 
