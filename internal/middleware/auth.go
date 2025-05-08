@@ -11,6 +11,8 @@ import (
 	"orus/internal/models"
 	"orus/internal/services/auth"
 
+	"slices"
+
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -35,6 +37,11 @@ func NewAuthMiddleware(authService auth.Service) *AuthMiddleware {
 // - Token expiration
 // - Token version matches current user version
 func (m *AuthMiddleware) Handler(c *fiber.Ctx) error {
+
+	if isPublicRoute(c.Path()) {
+		return c.Next()
+	}
+
 	// Get the Authorization header
 	authHeader := c.Get("Authorization")
 	if authHeader == "" {
@@ -202,4 +209,16 @@ func hasRequiredRole(userRole, requiredRole string) bool {
 	}
 
 	return userRoleLevel >= requiredRoleLevel
+}
+
+// isPublicRoute determines if a route should skip authentication
+func isPublicRoute(path string) bool {
+	publicPaths := []string{
+		"/api/auth/login",
+		"/api/auth/register",
+		"/api/auth/forgot-password",
+		"/api/auth/reset-password",
+	}
+
+	return slices.Contains(publicPaths, path)
 }
