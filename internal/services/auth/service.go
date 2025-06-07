@@ -3,17 +3,25 @@
 package auth
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"math/rand"
+	"time"
+
 	"orus/internal/models"
 	"orus/internal/repositories"
+	"orus/internal/repositories/cache"
 	"orus/internal/validation"
-	"time"
 
 	"log"
 
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 )
+
+// ErrMFARequired indicates that multi-factor authentication is needed
+var ErrMFARequired = errors.New("mfa_required")
 
 // Service defines the interface for authentication operations.
 // It provides methods for user authentication, token management,
@@ -40,19 +48,24 @@ type Service interface {
 
 	// GenerateTokens creates new access and refresh tokens for a user
 	GenerateTokens(user *models.User) (string, string, error)
+
+	// VerifyOTP completes login when MFA is enabled
+	VerifyOTP(userID uint, code string) (*models.User, string, string, error)
 }
 
 type service struct {
 	userRepo      repositories.UserRepository
 	jwtSecret     string
 	refreshSecret string
+	cache         *cache.CacheService
 }
 
-func NewService(userRepo repositories.UserRepository, jwtSecret, refreshSecret string) Service {
+func NewService(userRepo repositories.UserRepository, jwtSecret, refreshSecret string, cacheSvc *cache.CacheService) Service {
 	return &service{
 		userRepo:      userRepo,
 		jwtSecret:     jwtSecret,
 		refreshSecret: refreshSecret,
+		cache:         cacheSvc,
 	}
 }
 
@@ -74,6 +87,14 @@ func (s *service) Login(email, phone, password string) (*models.User, string, st
 	// Verify password
 	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(password)); err != nil {
 		return nil, "", "", errors.New("invalid credentials")
+	}
+
+	// If MFA is enabled, generate OTP and return special error
+	if user.TwoFactorEnabled {
+		if _, err := s.generateOTP(user.ID); err != nil {
+			return nil, "", "", err
+		}
+		return user, "", "", ErrMFARequired
 	}
 
 	// After successful login
@@ -230,4 +251,41 @@ func (s *service) GetUserTokenVersion(userID uint) (int, error) {
 	}
 	log.Printf("Retrieved token version %d for user %d", user.TokenVersion, userID)
 	return user.TokenVersion, nil
+}
+
+// generateOTP creates a 6 digit code and stores it in cache
+func (s *service) generateOTP(userID uint) (string, error) {
+	code := fmt.Sprintf("%06d", rand.Intn(1000000))
+	key := fmt.Sprintf("otp:%d", userID)
+	if err := s.cache.SetWithTTL(context.Background(), key, code, 5*time.Minute); err != nil {
+		return "", err
+	}
+	log.Printf("OTP for user %d: %s", userID, code)
+	return code, nil
+}
+
+// VerifyOTP checks the code and returns tokens if valid
+func (s *service) VerifyOTP(userID uint, code string) (*models.User, string, string, error) {
+	key := fmt.Sprintf("otp:%d", userID)
+	var stored string
+	found, err := s.cache.Get(context.Background(), key, &stored)
+	if err != nil || !found || stored != code {
+		return nil, "", "", errors.New("invalid otp")
+	}
+	_ = s.cache.Delete(context.Background(), key)
+
+	if err := s.userRepo.IncrementTokenVersion(userID); err != nil {
+		return nil, "", "", err
+	}
+	user, err := s.userRepo.GetByID(userID)
+	if err != nil {
+		return nil, "", "", err
+	}
+
+	access, refresh, err := s.generateTokens(user)
+	if err != nil {
+		return nil, "", "", err
+	}
+
+	return user, access, refresh, nil
 }
