@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"log"
 	"orus/internal/config"
 	"orus/internal/models"
@@ -49,6 +50,12 @@ func (h *AuthHandler) LoginUser(c *fiber.Ctx) error {
 
 	user, accessToken, refreshToken, err := h.authService.Login(input.Email, input.Phone, input.Password)
 	if err != nil {
+		if errors.Is(err, auth.ErrMFARequired) {
+			return c.JSON(fiber.Map{
+				"mfa_required": true,
+				"user_id":      user.ID,
+			})
+		}
 		if err.Error() == "invalid credentials" {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 				"error": "Invalid email or password",
@@ -59,17 +66,7 @@ func (h *AuthHandler) LoginUser(c *fiber.Ctx) error {
 		})
 	}
 
-	// Set refresh token as HTTP-only cookie
-	cookie := fiber.Cookie{
-		Name:     "refresh_token",
-		Value:    refreshToken,
-		Path:     "/",
-		Expires:  time.Now().Add(7 * 24 * time.Hour),
-		HTTPOnly: true,
-		Secure:   true,
-		SameSite: "Strict",
-	}
-	c.Cookie(&cookie)
+	h.setAuthCookies(c, accessToken, refreshToken)
 
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{
 		"access_token":  accessToken,
@@ -178,6 +175,35 @@ func (h *AuthHandler) ChangePassword(c *fiber.Ctx) error {
 
 	return utils.Success(c, fiber.Map{
 		"message": "Password changed successfully",
+	})
+}
+
+// VerifyOTP completes login after MFA code validation
+func (h *AuthHandler) VerifyOTP(c *fiber.Ctx) error {
+	var input struct {
+		UserID uint   `json:"user_id"`
+		Code   string `json:"code"`
+	}
+	if err := c.BodyParser(&input); err != nil {
+		return utils.BadRequest(c, "Invalid request body")
+	}
+
+	user, access, refresh, err := h.authService.VerifyOTP(input.UserID, input.Code)
+	if err != nil {
+		return utils.BadRequest(c, err.Error())
+	}
+
+	h.setAuthCookies(c, access, refresh)
+
+	return utils.Success(c, fiber.Map{
+		"access_token":  access,
+		"refresh_token": refresh,
+		"user": fiber.Map{
+			"id":          user.ID,
+			"email":       user.Email,
+			"role":        user.Role,
+			"permissions": models.GetDefaultPermissions(user.Role),
+		},
 	})
 }
 

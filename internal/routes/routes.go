@@ -9,14 +9,17 @@ import (
 	"orus/internal/middleware"
 	"orus/internal/models"
 	"orus/internal/repositories"
+	services "orus/internal/services"
 	"orus/internal/services/auth"
 	creditcard "orus/internal/services/credit-card"
 	"orus/internal/services/dashboard"
 	"orus/internal/services/dispute"
 	"orus/internal/services/merchant"
+	"orus/internal/services/notification"
 	"orus/internal/services/payment"
 	qr "orus/internal/services/qr_code"
 	"orus/internal/services/transaction"
+	"orus/internal/services/transfer"
 	"orus/internal/services/user"
 	"orus/internal/services/wallet"
 
@@ -38,7 +41,7 @@ func SetupRoutes(app *fiber.App, db *gorm.DB) {
 	// Initialize auth service and handler
 	jwtSecret := config.GetEnv("JWT_SECRET", "orus")
 	refreshSecret := config.GetEnv("REFRESH_SECRET", "your-refresh-secret")
-	authService := auth.NewService(userRepo, jwtSecret, refreshSecret)
+	authService := auth.NewService(userRepo, jwtSecret, refreshSecret, repositories.CacheService)
 	authHandler := handlers.NewAuthHandler(authService, refreshSecret)
 
 	// Initialize services in correct order
@@ -69,6 +72,10 @@ func SetupRoutes(app *fiber.App, db *gorm.DB) {
 
 	paymentService := payment.NewService(walletService, transactionService, qrService)
 
+	notificationService := notification.NewService()
+	transferService := transfer.NewService(walletService, notificationService)
+	transferHandler := handlers.NewTransferHandler(transferService)
+
 	// Initialize dashboard service and handler
 	dashboardService := dashboard.NewService(
 		repositories.NewTransactionRepository(db),
@@ -88,6 +95,9 @@ func SetupRoutes(app *fiber.App, db *gorm.DB) {
 	)
 	disputeHandler := handlers.NewDisputeHandler(disputeService)
 
+	kycService := services.NewKYCService()
+	kycHandler := handlers.NewKYCHandler(kycService)
+
 	// Initialize handlers
 	paymentHandler := handlers.NewPaymentHandler(qrService, paymentService)
 	merchantHandler := handlers.NewMerchantHandler(
@@ -106,6 +116,7 @@ func SetupRoutes(app *fiber.App, db *gorm.DB) {
 	api.Post("/login", authHandler.LoginUser)       // This becomes /api/login
 	api.Post("/register", userHandler.RegisterUser) // This becomes /api/register
 	api.Post("/refresh", authHandler.RefreshToken)  // This becomes /api/refresh
+	api.Post("/verify-otp", authHandler.VerifyOTP)
 
 	// Debug endpoints (public)
 	api.Get("/debug/token-version/:id", authHandler.GetTokenVersion)
@@ -127,7 +138,7 @@ func SetupRoutes(app *fiber.App, db *gorm.DB) {
 	protected := api.Use(authMiddleware.Handler) // Auth middleware starts here
 
 	// Setup different route groups
-	setupUserRoutes(protected, paymentHandler, userHandler, cardHandler, authHandler, qrService)
+	setupUserRoutes(protected, paymentHandler, userHandler, cardHandler, authHandler, qrService, kycHandler, transferHandler)
 	setupMerchantRoutes(protected, merchantHandler, paymentHandler)
 	// setupEnterpriseRoutes(protected, enterpriseHandler)
 	setupAdminRoutes(app, authMiddleware)
@@ -158,7 +169,7 @@ func SetupRoutes(app *fiber.App, db *gorm.DB) {
 	protected.Get("/test/cache-stats", handlers.CacheStats)
 }
 
-func setupUserRoutes(router fiber.Router, paymentHandler *handlers.PaymentHandler, userHandler *handlers.UserHandler, cardHandler *handlers.CreditCardHandler, authHandler *handlers.AuthHandler, qrService qr.Service) {
+func setupUserRoutes(router fiber.Router, paymentHandler *handlers.PaymentHandler, userHandler *handlers.UserHandler, cardHandler *handlers.CreditCardHandler, authHandler *handlers.AuthHandler, qrService qr.Service, kycHandler *handlers.KYCHandler, transferHandler *handlers.TransferHandler) {
 	// Initialize wallet handler
 	walletHandler := handlers.NewWalletHandler(walletService)
 
@@ -182,10 +193,16 @@ func setupUserRoutes(router fiber.Router, paymentHandler *handlers.PaymentHandle
 	payments := router.Group("/payment")
 	payments.Post("/scan", paymentHandler.ProcessQRPayment) // For users scanning QRs
 	payments.Post("/send", paymentHandler.SendMoney)        //✅
+	payments.Post("/p2p", transferHandler.Transfer)
 
 	// QR code routes
 	qrHandler := handlers.NewQRHandler(qrService)
 	router.Get("/qr-codes", middleware.HasPermission(models.PermissionWalletRead), qrHandler.GetUserQRCodes)
+
+	// KYC routes
+	kyc := router.Group("/kyc")
+	kyc.Post("/", kycHandler.SubmitKYC)
+	kyc.Get("/", kycHandler.GetStatus)
 }
 
 func setupMerchantRoutes(router fiber.Router, h *handlers.MerchantHandler, paymentHandler *handlers.PaymentHandler) {
